@@ -480,8 +480,8 @@ const ChatPage: React.FC = () => {
         // Check if summary needs to be updated
         await checkAndUpdateSummary(sessionId);
       } else {
-        // Fall back to the original modification approach
-        await handleLegacySubmit(currentPrompt);
+        // Fall back to the non-streaming modification approach
+        await handleNonStreamingSubmit(currentPrompt);
       }
     } catch (error) {
       console.error("Error handling submit:", error);
@@ -501,70 +501,67 @@ const ChatPage: React.FC = () => {
     }
   }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary]);
 
-  // Legacy submit handler for backward compatibility
-  const handleLegacySubmit = useCallback(async (currentPrompt: string) => {
+  // FIXED: Non-streaming submit handler that avoids the problematic legacy endpoint
+  const handleNonStreamingSubmit = useCallback(async (currentPrompt: string) => {
     try {
-      // Use the original modification approach
-      const analysisPrompt = `You are analyzing a Vite React project structure that uses Tailwind CSS for styling. Based on the user's requirement and the provided project structure, identify which files need to be modified to implement the requested changes.
-
-RESPONSE FORMAT:
-Return a JSON object with this exact structure:
-{
-  "files_to_modify": ["array of existing file paths that need changes"],
-  "files_to_create": ["array of new file paths that need to be created"],
-  "reasoning": "brief explanation of why these files were selected",
-  "dependencies": ["array of npm packages that might need to be installed"],
-  "notes": "additional implementation notes or considerations"
-}
-
-PROJECT STRUCTURE: ${JSON.stringify(value, null, 2)}
-USER REQUIREMENT: ${currentPrompt}`;
-
-      const res = await axios.post(`${baseUrl}/generateChanges`, {
-        prompt: analysisPrompt,
-      });
-
-      const analysisResult = res.data.content[0].text;
-
-      const filesToChange = await axios.post(
-        `${baseUrl}/extractFilesToChange`,
-        {
-          pwd: "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
-          analysisResult,
-        }
-      );
-
-      const updatedFile = await axios.post(`${baseUrl}/modify`, {
-        files: filesToChange.data.files,
+      // Use the new API endpoint instead of legacy /modify
+      const response = await axios.post(`${baseUrl}/api/modify`, {
         prompt: currentPrompt,
+        sessionId: sessionId,
+        projectId: projectId,
+        projectStructure: value,
       });
 
-      const parsedData = JSON.parse(updatedFile.data.content[0].text);
-      const result = parsedData.map((item: any) => ({
-        path: item.path,
-        content: item.content,
-      }));
-
-      await axios.post(`${baseUrl}/write-files`, {
-        baseDir:
-          "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
-        files: result,
-      });
+      let responseContent = "Changes applied successfully!";
+      
+      // Try to extract meaningful response from the API
+      if (response.data && response.data.content) {
+        if (typeof response.data.content === 'string') {
+          responseContent = response.data.content;
+        } else if (Array.isArray(response.data.content) && response.data.content.length > 0) {
+          responseContent = response.data.content[0].text || responseContent;
+        }
+      } else if (response.data && response.data.message) {
+        responseContent = response.data.message;
+      }
 
       const assistantMessage: Message = {
         id: (Date.now() + 1).toString(),
-        content: "Changes applied successfully!",
+        content: responseContent,
         type: "assistant",
         timestamp: new Date(),
       };
 
       setMessages((prev) => [...prev, assistantMessage]);
       await saveMessage(assistantMessage.content, 'assistant');
+      
     } catch (error) {
-      console.error("Error handling legacy submit:", error);
+      console.error("Error in non-streaming modification:", error);
+      
+      // Try to provide helpful error information
+      let errorMessage = "Sorry, I encountered an error while applying the changes.";
+      
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 501) {
+          errorMessage = "This feature is currently unavailable. The modification service needs to be configured.";
+        } else if (error.response?.data?.message) {
+          errorMessage = `Error: ${error.response.data.message}`;
+        }
+      }
+      
+      const assistantErrorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: errorMessage,
+        type: "assistant",
+        timestamp: new Date(),
+      };
+
+      setMessages((prev) => [...prev, assistantErrorMessage]);
+      await saveMessage(assistantErrorMessage.content, 'assistant');
+      
       throw error;
     }
-  }, [value, baseUrl, saveMessage]);
+  }, [value, baseUrl, saveMessage, sessionId, projectId]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
