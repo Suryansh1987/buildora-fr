@@ -7,13 +7,14 @@ import React, {
 } from "react";
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
-import { Send, Code, Loader2 } from "lucide-react";
+import { Send, Code, Loader2, MessageSquare, History } from "lucide-react";
 import { useLocation } from "react-router-dom";
 
 interface LocationState {
   prompt?: string;
   projectId?: number;
   existingProject?: boolean;
+  sessionId?: string;
 }
 
 interface Project {
@@ -27,11 +28,28 @@ interface Message {
   content: string;
   type: "user" | "assistant";
   timestamp: Date;
+  isStreaming?: boolean;
+}
+
+interface ConversationSummary {
+  id: string;
+  summary: string;
+  messageCount: number;
+  createdAt: string;
+  updatedAt: string;
 }
 
 interface ContextValue {
   value: any;
   setValue: (value: any) => void;
+}
+
+interface ConversationStats {
+  totalMessages: number;
+  totalSummaries: number;
+  oldestMessage: string;
+  newestMessage: string;
+  averageMessageLength: number;
 }
 
 const ChatPage: React.FC = () => {
@@ -44,20 +62,128 @@ const ChatPage: React.FC = () => {
   const [projectStatus, setProjectStatus] = useState<
     "idle" | "loading" | "ready" | "error"
   >("idle");
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [currentSummary, setCurrentSummary] = useState<ConversationSummary | null>(null);
+  const [conversationStats, setConversationStats] = useState<ConversationStats | null>(null);
+  const [isStreamingResponse, setIsStreamingResponse] = useState(false);
 
   // Refs to prevent duplicate API calls
   const hasInitialized = useRef(false);
   const isGenerating = useRef(false);
   const currentProjectId = useRef<number | null>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messageCountRef = useRef(0);
 
   const location = useLocation();
   const {
     prompt: navPrompt,
     projectId,
     existingProject,
+    sessionId: initialSessionId,
   } = (location.state as LocationState) || {};
-  console.log(navPrompt, projectId, existingProject);
+
   const baseUrl = import.meta.env.VITE_BASE_URL;
+
+  // Auto-scroll to bottom when messages change
+  const scrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  // Initialize or get session
+  const initializeSession = useCallback(async () => {
+    try {
+      let currentSessionId = initialSessionId || sessionId;
+      
+      if (!currentSessionId) {
+        const response = await axios.post(`${baseUrl}/api/session/create`, {
+          projectId: projectId || null,
+        });
+        currentSessionId = response.data.sessionId;
+        setSessionId(currentSessionId);
+      }
+
+      // Load existing conversation if session exists
+      if (currentSessionId) {
+        await loadConversationHistory(currentSessionId);
+        await loadCurrentSummary(currentSessionId);
+        await loadConversationStats(currentSessionId);
+      }
+
+      return currentSessionId;
+    } catch (error) {
+      console.error("Error initializing session:", error);
+      setError("Failed to initialize chat session");
+      return null;
+    }
+  }, [baseUrl, projectId, initialSessionId, sessionId]);
+
+  // Load conversation history
+  const loadConversationHistory = useCallback(async (sessionId: string) => {
+    try {
+      const response = await axios.get(
+        `${baseUrl}/api/conversation/conversation-with-summary?sessionId=${sessionId}`
+      );
+      
+      const history = response.data.messages || [];
+      const formattedMessages: Message[] = history.map((msg: any) => ({
+        id: msg.id || Date.now().toString(),
+        content: msg.content,
+        type: msg.role === "user" ? "user" : "assistant",
+        timestamp: new Date(msg.timestamp),
+      }));
+
+      setMessages(formattedMessages);
+      messageCountRef.current = formattedMessages.length;
+    } catch (error) {
+      console.error("Error loading conversation history:", error);
+    }
+  }, [baseUrl]);
+
+  // Load current summary
+  const loadCurrentSummary = useCallback(async (sessionId: string) => {
+    try {
+      const response = await axios.get(
+        `${baseUrl}/api/conversation/current-summary?sessionId=${sessionId}`
+      );
+      setCurrentSummary(response.data.summary);
+    } catch (error) {
+      console.error("Error loading current summary:", error);
+    }
+  }, [baseUrl]);
+
+  // Load conversation stats
+  const loadConversationStats = useCallback(async (sessionId: string) => {
+    try {
+      const response = await axios.get(
+        `${baseUrl}/api/conversation/conversation-stats?sessionId=${sessionId}`
+      );
+      setConversationStats(response.data);
+    } catch (error) {
+      console.error("Error loading conversation stats:", error);
+    }
+  }, [baseUrl]);
+
+  // Check if summary should be updated (after every 5 messages)
+  const checkAndUpdateSummary = useCallback(async (sessionId: string) => {
+    const currentMessageCount = messages.length;
+    if (currentMessageCount > 0 && currentMessageCount % 5 === 0 && currentMessageCount !== messageCountRef.current) {
+      try {
+        await axios.post(`${baseUrl}/api/conversation/messages`, {
+          sessionId,
+          action: "update_summary"
+        });
+        await loadCurrentSummary(sessionId);
+        await loadConversationStats(sessionId);
+        messageCountRef.current = currentMessageCount;
+      } catch (error) {
+        console.error("Error updating summary:", error);
+      }
+    }
+  }, [baseUrl, messages.length, loadCurrentSummary, loadConversationStats]);
 
   // Memoized function to fetch project deployment URL
   const fetchProjectDeploymentUrl = useCallback(
@@ -78,8 +204,6 @@ const ChatPage: React.FC = () => {
           setPreviewUrl(project.deploymentUrl);
           setProjectStatus("ready");
         } else {
-          // This case might mean the project exists but the build failed previously
-          // Or it's still pending. You might want more granular status from backend.
           setError("Project found, but deployment is not ready.");
           setProjectStatus("error");
         }
@@ -91,6 +215,7 @@ const ChatPage: React.FC = () => {
     },
     [baseUrl, projectStatus]
   );
+
   // Memoized function to generate code
   const generateCode = useCallback(
     async (userPrompt: string, projId?: number) => {
@@ -101,9 +226,10 @@ const ChatPage: React.FC = () => {
       setProjectStatus("loading");
 
       try {
-        const response = await axios.post(`${baseUrl}/api/projects/generate`, {
+        const response = await axios.post(`${baseUrl}/api/generate`, {
           prompt: userPrompt,
           projectId: projId,
+          sessionId: sessionId,
         });
 
         setPreviewUrl(response.data.previewUrl);
@@ -114,9 +240,6 @@ const ChatPage: React.FC = () => {
           });
         }
         setProjectStatus("ready");
-
-        // REMOVED: The axios.put call. The backend is now responsible for
-        // updating its own database with the new deployment URL.
       } catch (error) {
         console.error("Error generating code:", error);
         setError("Failed to generate code. Please try again.");
@@ -125,16 +248,19 @@ const ChatPage: React.FC = () => {
         isGenerating.current = false;
       }
     },
-    [baseUrl] // REMOVED: `setValue` is no longer a dependency
+    [baseUrl, sessionId]
   );
+
   // Initialize component only once
   useEffect(() => {
     if (hasInitialized.current) return;
 
     const initializeProject = async () => {
+      const currentSessionId = await initializeSession();
+      
       if (existingProject && projectId) {
         await fetchProjectDeploymentUrl(projectId);
-      } else if (navPrompt && projectId) {
+      } else if (navPrompt && projectId && currentSessionId) {
         setPrompt(navPrompt);
         await generateCode(navPrompt, projectId);
       } else {
@@ -144,11 +270,112 @@ const ChatPage: React.FC = () => {
     };
 
     initializeProject();
-  }, []); // Empty dependency array - runs only once
+  }, []);
+
+  // Handle streaming response
+  const handleStreamingResponse = useCallback(async (
+    currentPrompt: string, 
+    currentSessionId: string
+  ) => {
+    try {
+      setIsStreamingResponse(true);
+      
+      // Add streaming message placeholder
+      const streamingMessage: Message = {
+        id: `streaming-${Date.now()}`,
+        content: "",
+        type: "assistant",
+        timestamp: new Date(),
+        isStreaming: true,
+      };
+      
+      setMessages((prev) => [...prev, streamingMessage]);
+
+      const response = await fetch(`${baseUrl}/api/modify/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: currentPrompt,
+          sessionId: currentSessionId,
+          projectStructure: value,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Streaming request failed');
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      let accumulatedContent = '';
+      
+      while (true) {
+        const { done, value: chunk } = await reader.read();
+        if (done) break;
+
+        const text = new TextDecoder().decode(chunk);
+        const lines = text.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (data.content) {
+                accumulatedContent += data.content;
+                
+                // Update the streaming message
+                setMessages((prev) => 
+                  prev.map((msg) => 
+                    msg.id === streamingMessage.id 
+                      ? { ...msg, content: accumulatedContent }
+                      : msg
+                  )
+                );
+              }
+            } catch (e) {
+              // Ignore parsing errors for non-JSON lines
+            }
+          }
+        }
+      }
+
+      // Finalize the streaming message
+      setMessages((prev) => 
+        prev.map((msg) => 
+          msg.id === streamingMessage.id 
+            ? { ...msg, isStreaming: false }
+            : msg
+        )
+      );
+
+    } catch (error) {
+      console.error("Error in streaming response:", error);
+      
+      // Remove streaming message and add error message
+      setMessages((prev) => 
+        prev.filter((msg) => msg.id !== `streaming-${Date.now()}`)
+      );
+      
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: "Sorry, I encountered an error while processing your request.",
+        type: "assistant",
+        timestamp: new Date(),
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setIsStreamingResponse(false);
+    }
+  }, [baseUrl, value]);
 
   // Handle user prompt for code changes
   const handleSubmit = useCallback(async () => {
-    if (!prompt.trim() || isLoading) return;
+    if (!prompt.trim() || isLoading || !sessionId) return;
 
     setIsLoading(true);
     setError("");
@@ -165,60 +392,21 @@ const ChatPage: React.FC = () => {
     setPrompt("");
 
     try {
-      const analysisPrompt = `You are analyzing a Vite React project structure that uses Tailwind CSS for styling. Based on the user's requirement and the provided project structure, identify which files need to be modified to implement the requested changes.
-
-RESPONSE FORMAT:
-Return a JSON object with this exact structure:
-{
-  "files_to_modify": ["array of existing file paths that need changes"],
-  "files_to_create": ["array of new file paths that need to be created"],
-  "reasoning": "brief explanation of why these files were selected",
-  "dependencies": ["array of npm packages that might need to be installed"],
-  "notes": "additional implementation notes or considerations"
-}
-
-PROJECT STRUCTURE: ${JSON.stringify(value, null, 2)}
-USER REQUIREMENT: ${currentPrompt}`;
-
-      const res = await axios.post(`${baseUrl}/generateChanges`, {
-        prompt: analysisPrompt,
+      // Save user message to conversation
+      await axios.post(`${baseUrl}/api/conversation/messages`, {
+        sessionId,
+        message: {
+          role: "user",
+          content: currentPrompt,
+        },
       });
 
-      const analysisResult = res.data.content[0].text;
+      // Use streaming response for better UX
+      await handleStreamingResponse(currentPrompt, sessionId);
 
-      const filesToChange = await axios.post(
-        `${baseUrl}/extractFilesToChange`,
-        {
-          pwd: "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
-          analysisResult,
-        }
-      );
+      // Check if summary needs to be updated
+      await checkAndUpdateSummary(sessionId);
 
-      const updatedFile = await axios.post(`${baseUrl}/modify`, {
-        files: filesToChange.data.files,
-        prompt: currentPrompt,
-      });
-
-      const parsedData = JSON.parse(updatedFile.data.content[0].text);
-      const result = parsedData.map((item: any) => ({
-        path: item.path,
-        content: item.content,
-      }));
-
-      await axios.post(`${baseUrl}/write-files`, {
-        baseDir:
-          "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
-        files: result,
-      });
-
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: "Changes applied successfully!",
-        type: "assistant",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
     } catch (error) {
       console.error("Error handling submit:", error);
       setError("Failed to apply changes");
@@ -234,7 +422,7 @@ USER REQUIREMENT: ${currentPrompt}`;
     } finally {
       setIsLoading(false);
     }
-  }, [prompt, isLoading, value, baseUrl]);
+  }, [prompt, isLoading, sessionId, baseUrl, checkAndUpdateSummary, handleStreamingResponse]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -253,20 +441,63 @@ USER REQUIREMENT: ${currentPrompt}`;
     []
   );
 
+  // Clear conversation
+  const clearConversation = useCallback(async () => {
+    if (!sessionId) return;
+    
+    try {
+      await axios.delete(`${baseUrl}/api/conversation/conversation?sessionId=${sessionId}`);
+      setMessages([]);
+      setCurrentSummary(null);
+      setConversationStats(null);
+      messageCountRef.current = 0;
+    } catch (error) {
+      console.error("Error clearing conversation:", error);
+      setError("Failed to clear conversation");
+    }
+  }, [baseUrl, sessionId]);
+
   return (
     <div className="w-full bg-gradient-to-br from-black via-neutral-950 to-black h-screen flex">
       {/* Chat Section - 25% width */}
       <div className="w-1/4 flex flex-col border-r border-slate-700/50">
         {/* Header */}
         <div className="bg-slate-black/50 backdrop-blur-sm border-b border-slate-700/50 p-4">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center justify-between">
             <div>
               <a href="/" className="text-xl font-semibold text-white">
                 Buildora
               </a>
             </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={clearConversation}
+                className="p-1.5 text-slate-400 hover:text-white transition-colors"
+                title="Clear conversation"
+              >
+                <History className="w-4 h-4" />
+              </button>
+            </div>
           </div>
         </div>
+
+        {/* Summary Section */}
+        {currentSummary && (
+          <div className="bg-slate-800/30 border-b border-slate-700/50 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <MessageSquare className="w-4 h-4 text-blue-400" />
+              <span className="text-xs font-medium text-blue-400">SUMMARY</span>
+            </div>
+            <p className="text-xs text-slate-300 line-clamp-3">
+              {currentSummary.summary}
+            </p>
+            {conversationStats && (
+              <div className="mt-2 text-xs text-slate-400">
+                {conversationStats.totalMessages} messages • {conversationStats.totalSummaries} summaries
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -303,21 +534,36 @@ USER REQUIREMENT: ${currentPrompt}`;
               </p>
             </div>
           ) : (
-            messages.map((message) => (
-              <div
-                key={message.id}
-                className={`p-3 rounded-lg ${
-                  message.type === "user"
-                    ? "bg-blue-600/20 ml-4"
-                    : "bg-slate-800/30 mr-4"
-                }`}
-              >
-                <p className="text-white text-sm">{message.content}</p>
-                <span className="text-xs text-slate-400 mt-1 block">
-                  {message.timestamp.toLocaleTimeString()}
-                </span>
-              </div>
-            ))
+            <>
+              {messages
+                .sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime())
+                .map((message) => (
+                  <div
+                    key={message.id}
+                    className={`p-3 rounded-lg ${
+                      message.type === "user"
+                        ? "bg-blue-600/20 ml-4"
+                        : "bg-slate-800/30 mr-4"
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <p className="text-white text-sm flex-1">
+                        {message.content}
+                        {message.isStreaming && (
+                          <span className="inline-block w-2 h-4 bg-blue-500 ml-1 animate-pulse"></span>
+                        )}
+                      </p>
+                      {message.isStreaming && (
+                        <Loader2 className="w-3 h-3 text-slate-400 animate-spin mt-0.5" />
+                      )}
+                    </div>
+                    <span className="text-xs text-slate-400 mt-1 block">
+                      {message.timestamp.toLocaleTimeString()}
+                    </span>
+                  </div>
+                ))}
+              <div ref={messagesEndRef} />
+            </>
           )}
         </div>
 
@@ -331,17 +577,17 @@ USER REQUIREMENT: ${currentPrompt}`;
               onKeyPress={handleKeyPress}
               placeholder="Describe changes..."
               rows={2}
-              disabled={isLoading || projectStatus === "loading"}
+              disabled={isLoading || projectStatus === "loading" || isStreamingResponse}
               maxLength={1000}
             />
             <button
               onClick={handleSubmit}
               disabled={
-                !prompt.trim() || isLoading || projectStatus === "loading"
+                !prompt.trim() || isLoading || projectStatus === "loading" || isStreamingResponse
               }
               className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg transition-colors duration-200"
             >
-              {isLoading ? (
+              {isLoading || isStreamingResponse ? (
                 <Loader2 className="w-4 h-4 text-white animate-spin" />
               ) : (
                 <Send className="w-4 h-4 text-white" />
@@ -361,21 +607,28 @@ USER REQUIREMENT: ${currentPrompt}`;
         <div className="bg-black/50 backdrop-blur-sm border-b border-slate-700/50 p-4">
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">Live Preview</h2>
-            <div className="flex items-center gap-2">
-              <div
-                className={`w-3 h-3 rounded-full ${
-                  projectStatus === "ready"
-                    ? "bg-green-500"
-                    : projectStatus === "loading"
-                    ? "bg-yellow-500"
-                    : projectStatus === "error"
-                    ? "bg-red-500"
-                    : "bg-gray-500"
-                }`}
-              ></div>
-              <span className="text-xs text-slate-400 capitalize">
-                {projectStatus}
-              </span>
+            <div className="flex items-center gap-4">
+              {sessionId && (
+                <span className="text-xs text-slate-400">
+                  Session: {sessionId.slice(0, 8)}...
+                </span>
+              )}
+              <div className="flex items-center gap-2">
+                <div
+                  className={`w-3 h-3 rounded-full ${
+                    projectStatus === "ready"
+                      ? "bg-green-500"
+                      : projectStatus === "loading"
+                      ? "bg-yellow-500"
+                      : projectStatus === "error"
+                      ? "bg-red-500"
+                      : "bg-gray-500"
+                  }`}
+                ></div>
+                <span className="text-xs text-slate-400 capitalize">
+                  {projectStatus}
+                </span>
+              </div>
             </div>
           </div>
         </div>
