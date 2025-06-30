@@ -66,6 +66,7 @@ const ChatPage: React.FC = () => {
   const [currentSummary, setCurrentSummary] = useState<ConversationSummary | null>(null);
   const [conversationStats, setConversationStats] = useState<ConversationStats | null>(null);
   const [isStreamingResponse, setIsStreamingResponse] = useState(false);
+  const [hasSessionSupport, setHasSessionSupport] = useState(true);
 
   // Refs to prevent duplicate API calls
   const hasInitialized = useRef(false);
@@ -99,18 +100,38 @@ const ChatPage: React.FC = () => {
       let currentSessionId = initialSessionId || sessionId;
       
       if (!currentSessionId) {
-        const response = await axios.post(`${baseUrl}/api/session/create`, {
-          projectId: projectId || null,
-        });
-        currentSessionId = response.data.sessionId;
-        setSessionId(currentSessionId);
+        try {
+          const response = await axios.post(`${baseUrl}/api/session/create`, {
+            projectId: projectId || null,
+          });
+          currentSessionId = response.data.sessionId;
+          setSessionId(currentSessionId);
+          setHasSessionSupport(true);
+        } catch (sessionError) {
+          console.warn("Session endpoint not available, using project-based messaging");
+          setHasSessionSupport(false);
+          // Use project-based session ID
+          currentSessionId = projectId ? `project-${projectId}` : `temp-${Date.now()}`;
+          setSessionId(currentSessionId);
+        }
       }
 
-      // Load existing conversation if session exists
-      if (currentSessionId) {
-        await loadConversationHistory(currentSessionId);
-        await loadCurrentSummary(currentSessionId);
-        await loadConversationStats(currentSessionId);
+      // Load existing conversation if session exists and session API is working
+      if (currentSessionId && hasSessionSupport && !currentSessionId.startsWith('temp-') && !currentSessionId.startsWith('project-')) {
+        try {
+          await loadConversationHistory(currentSessionId);
+          await loadCurrentSummary(currentSessionId);
+          await loadConversationStats(currentSessionId);
+        } catch (error) {
+          console.warn("Could not load conversation history:", error);
+        }
+      } else if (projectId && hasSessionSupport) {
+        // Try to load project-based messages
+        try {
+          await loadProjectMessages(projectId);
+        } catch (error) {
+          console.warn("Could not load project messages:", error);
+        }
       }
 
       return currentSessionId;
@@ -119,7 +140,7 @@ const ChatPage: React.FC = () => {
       setError("Failed to initialize chat session");
       return null;
     }
-  }, [baseUrl, projectId, initialSessionId, sessionId]);
+  }, [baseUrl, projectId, initialSessionId, sessionId, hasSessionSupport]);
 
   // Load conversation history
   const loadConversationHistory = useCallback(async (sessionId: string) => {
@@ -140,6 +161,26 @@ const ChatPage: React.FC = () => {
       messageCountRef.current = formattedMessages.length;
     } catch (error) {
       console.error("Error loading conversation history:", error);
+    }
+  }, [baseUrl]);
+
+  // Load project messages (fallback)
+  const loadProjectMessages = useCallback(async (projectId: number) => {
+    try {
+      const response = await axios.get(`${baseUrl}/api/messages/project/${projectId}`);
+      const history = response.data || [];
+      
+      const formattedMessages: Message[] = history.map((msg: any) => ({
+        id: msg.id || Date.now().toString(),
+        content: msg.content,
+        type: msg.role === "user" ? "user" : "assistant",
+        timestamp: new Date(msg.createdAt || msg.timestamp),
+      }));
+
+      setMessages(formattedMessages);
+      messageCountRef.current = formattedMessages.length;
+    } catch (error) {
+      console.error("Error loading project messages:", error);
     }
   }, [baseUrl]);
 
@@ -169,6 +210,8 @@ const ChatPage: React.FC = () => {
 
   // Check if summary should be updated (after every 5 messages)
   const checkAndUpdateSummary = useCallback(async (sessionId: string) => {
+    if (!hasSessionSupport) return;
+    
     const currentMessageCount = messages.length;
     if (currentMessageCount > 0 && currentMessageCount % 5 === 0 && currentMessageCount !== messageCountRef.current) {
       try {
@@ -183,7 +226,7 @@ const ChatPage: React.FC = () => {
         console.error("Error updating summary:", error);
       }
     }
-  }, [baseUrl, messages.length, loadCurrentSummary, loadConversationStats]);
+  }, [baseUrl, messages.length, loadCurrentSummary, loadConversationStats, hasSessionSupport]);
 
   // Memoized function to fetch project deployment URL
   const fetchProjectDeploymentUrl = useCallback(
@@ -229,17 +272,22 @@ const ChatPage: React.FC = () => {
         const response = await axios.post(`${baseUrl}/api/generate`, {
           prompt: userPrompt,
           projectId: projId,
-          sessionId: sessionId,
         });
 
         setPreviewUrl(response.data.previewUrl);
-        if (projId && response.data.previewUrl) {
-          await axios.put(`${baseUrl}/api/projects/${projId}`, {
-            deploymentUrl: response.data.previewUrl,
-            status: "ready",
-          });
-        }
         setProjectStatus("ready");
+
+        // Update project if needed
+        if (projId && response.data.previewUrl) {
+          try {
+            await axios.put(`${baseUrl}/api/projects/${projId}`, {
+              deploymentUrl: response.data.previewUrl,
+              status: "ready",
+            });
+          } catch (updateError) {
+            console.warn("Could not update project:", updateError);
+          }
+        }
       } catch (error) {
         console.error("Error generating code:", error);
         setError("Failed to generate code. Please try again.");
@@ -248,7 +296,7 @@ const ChatPage: React.FC = () => {
         isGenerating.current = false;
       }
     },
-    [baseUrl, sessionId]
+    [baseUrl]
   );
 
   // Initialize component only once
@@ -260,7 +308,7 @@ const ChatPage: React.FC = () => {
       
       if (existingProject && projectId) {
         await fetchProjectDeploymentUrl(projectId);
-      } else if (navPrompt && projectId && currentSessionId) {
+      } else if (navPrompt && projectId) {
         setPrompt(navPrompt);
         await generateCode(navPrompt, projectId);
       } else {
@@ -270,7 +318,7 @@ const ChatPage: React.FC = () => {
     };
 
     initializeProject();
-  }, []);
+  }, [initializeSession, fetchProjectDeploymentUrl, generateCode, existingProject, projectId, navPrompt]);
 
   // Handle streaming response
   const handleStreamingResponse = useCallback(async (
@@ -299,6 +347,7 @@ const ChatPage: React.FC = () => {
         body: JSON.stringify({
           prompt: currentPrompt,
           sessionId: currentSessionId,
+          projectId: projectId,
           projectStructure: value,
         }),
       });
@@ -358,7 +407,8 @@ const ChatPage: React.FC = () => {
       
       // Remove streaming message and add error message
       setMessages((prev) => 
-        prev.filter((msg) => msg.id !== `streaming-${Date.now()}`)
+        //@ts-ignore
+        prev.filter((msg) => msg.id !== streamingMessage.id)
       );
       
       const errorMessage: Message = {
@@ -371,11 +421,39 @@ const ChatPage: React.FC = () => {
     } finally {
       setIsStreamingResponse(false);
     }
-  }, [baseUrl, value]);
+  }, [baseUrl, value, projectId]);
+
+  // Save message to backend
+  const saveMessage = useCallback(async (content: string, role: 'user' | 'assistant') => {
+    if (!projectId) return;
+
+    try {
+      if (hasSessionSupport && sessionId && !sessionId.startsWith('temp-') && !sessionId.startsWith('project-')) {
+        // Use session-based messaging
+        await axios.post(`${baseUrl}/api/conversation/messages`, {
+          sessionId,
+          message: {
+            role,
+            content,
+          },
+        });
+      } else {
+        // Use project-based messaging
+        await axios.post(`${baseUrl}/api/messages`, {
+          projectId,
+          role,
+          content,
+          metadata: { sessionId },
+        });
+      }
+    } catch (error) {
+      console.warn("Could not save message:", error);
+    }
+  }, [baseUrl, projectId, sessionId, hasSessionSupport]);
 
   // Handle user prompt for code changes
   const handleSubmit = useCallback(async () => {
-    if (!prompt.trim() || isLoading || !sessionId) return;
+    if (!prompt.trim() || isLoading) return;
 
     setIsLoading(true);
     setError("");
@@ -391,22 +469,20 @@ const ChatPage: React.FC = () => {
     const currentPrompt = prompt;
     setPrompt("");
 
+    // Save user message
+    await saveMessage(currentPrompt, 'user');
+
     try {
-      // Save user message to conversation
-      await axios.post(`${baseUrl}/api/conversation/messages`, {
-        sessionId,
-        message: {
-          role: "user",
-          content: currentPrompt,
-        },
-      });
-
-      // Use streaming response for better UX
-      await handleStreamingResponse(currentPrompt, sessionId);
-
-      // Check if summary needs to be updated
-      await checkAndUpdateSummary(sessionId);
-
+      if (hasSessionSupport && sessionId && !sessionId.startsWith('temp-')) {
+        // Use streaming response for better UX
+        await handleStreamingResponse(currentPrompt, sessionId);
+        
+        // Check if summary needs to be updated
+        await checkAndUpdateSummary(sessionId);
+      } else {
+        // Fall back to the original modification approach
+        await handleLegacySubmit(currentPrompt);
+      }
     } catch (error) {
       console.error("Error handling submit:", error);
       setError("Failed to apply changes");
@@ -419,10 +495,76 @@ const ChatPage: React.FC = () => {
       };
 
       setMessages((prev) => [...prev, errorMessage]);
+      await saveMessage(errorMessage.content, 'assistant');
     } finally {
       setIsLoading(false);
     }
-  }, [prompt, isLoading, sessionId, baseUrl, checkAndUpdateSummary, handleStreamingResponse]);
+  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary]);
+
+  // Legacy submit handler for backward compatibility
+  const handleLegacySubmit = useCallback(async (currentPrompt: string) => {
+    try {
+      // Use the original modification approach
+      const analysisPrompt = `You are analyzing a Vite React project structure that uses Tailwind CSS for styling. Based on the user's requirement and the provided project structure, identify which files need to be modified to implement the requested changes.
+
+RESPONSE FORMAT:
+Return a JSON object with this exact structure:
+{
+  "files_to_modify": ["array of existing file paths that need changes"],
+  "files_to_create": ["array of new file paths that need to be created"],
+  "reasoning": "brief explanation of why these files were selected",
+  "dependencies": ["array of npm packages that might need to be installed"],
+  "notes": "additional implementation notes or considerations"
+}
+
+PROJECT STRUCTURE: ${JSON.stringify(value, null, 2)}
+USER REQUIREMENT: ${currentPrompt}`;
+
+      const res = await axios.post(`${baseUrl}/generateChanges`, {
+        prompt: analysisPrompt,
+      });
+
+      const analysisResult = res.data.content[0].text;
+
+      const filesToChange = await axios.post(
+        `${baseUrl}/extractFilesToChange`,
+        {
+          pwd: "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
+          analysisResult,
+        }
+      );
+
+      const updatedFile = await axios.post(`${baseUrl}/modify`, {
+        files: filesToChange.data.files,
+        prompt: currentPrompt,
+      });
+
+      const parsedData = JSON.parse(updatedFile.data.content[0].text);
+      const result = parsedData.map((item: any) => ({
+        path: item.path,
+        content: item.content,
+      }));
+
+      await axios.post(`${baseUrl}/write-files`, {
+        baseDir:
+          "/Users/manmindersingh/Desktop/code /ai-webisite-builder/react-base-temp",
+        files: result,
+      });
+
+      const assistantMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        content: "Changes applied successfully!",
+        type: "assistant",
+        timestamp: new Date(),
+      };
+
+      setMessages((prev) => [...prev, assistantMessage]);
+      await saveMessage(assistantMessage.content, 'assistant');
+    } catch (error) {
+      console.error("Error handling legacy submit:", error);
+      throw error;
+    }
+  }, [value, baseUrl, saveMessage]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -446,7 +588,12 @@ const ChatPage: React.FC = () => {
     if (!sessionId) return;
     
     try {
-      await axios.delete(`${baseUrl}/api/conversation/conversation?sessionId=${sessionId}`);
+      if (hasSessionSupport && !sessionId.startsWith('temp-') && !sessionId.startsWith('project-')) {
+        await axios.delete(`${baseUrl}/api/conversation/conversation?sessionId=${sessionId}`);
+      } else if (projectId) {
+        await axios.delete(`${baseUrl}/api/messages/project/${projectId}`);
+      }
+      
       setMessages([]);
       setCurrentSummary(null);
       setConversationStats(null);
@@ -455,7 +602,7 @@ const ChatPage: React.FC = () => {
       console.error("Error clearing conversation:", error);
       setError("Failed to clear conversation");
     }
-  }, [baseUrl, sessionId]);
+  }, [baseUrl, sessionId, projectId, hasSessionSupport]);
 
   return (
     <div className="w-full bg-gradient-to-br from-black via-neutral-950 to-black h-screen flex">
@@ -496,6 +643,19 @@ const ChatPage: React.FC = () => {
                 {conversationStats.totalMessages} messages • {conversationStats.totalSummaries} summaries
               </div>
             )}
+          </div>
+        )}
+
+        {/* Session Status */}
+        {!hasSessionSupport && (
+          <div className="bg-yellow-500/10 border-b border-yellow-500/20 p-3">
+            <div className="flex items-center gap-2 mb-1">
+              <div className="w-2 h-2 bg-yellow-500 rounded-full"></div>
+              <span className="text-xs font-medium text-yellow-400">COMPATIBILITY MODE</span>
+            </div>
+            <p className="text-xs text-yellow-300">
+              Using project-based messaging (advanced features unavailable)
+            </p>
           </div>
         )}
 

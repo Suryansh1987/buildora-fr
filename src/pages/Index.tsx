@@ -10,7 +10,7 @@ import {
 
 import { motion } from "motion/react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Calendar, Code2, Trash2 } from "lucide-react";
+import { ExternalLink, Calendar, Code2, Trash2, MessageSquare, Clock, Activity, AlertCircle } from "lucide-react";
 
 // --- Types ---
 interface Project {
@@ -19,8 +19,11 @@ interface Project {
   description?: string;
   deploymentUrl?: string;
   createdAt: string;
+  updatedAt?: string;
   projectType?: string;
   status?: string;
+  lastSessionId?: string;
+  messageCount?: number;
 }
 
 interface DbUser {
@@ -32,6 +35,13 @@ interface DbUser {
   profileImage?: string;
 }
 
+interface SessionInfo {
+  sessionId: string;
+  messageCount: number;
+  lastActivity: string;
+  hasActiveConversation: boolean;
+}
+
 // --- Constants ---
 const BASE_URL = import.meta.env.VITE_BASE_URL;
 
@@ -41,6 +51,9 @@ const ProjectCard = React.memo(
     project,
     onProjectClick,
     onDeleteProject,
+    onContinueChat,
+    sessionInfo,
+    hasSessionSupport,
   }: {
     project: Project;
     onProjectClick: (project: Project) => void;
@@ -48,6 +61,12 @@ const ProjectCard = React.memo(
       projectId: number,
       e: React.MouseEvent<HTMLButtonElement>
     ) => void;
+    onContinueChat: (
+      project: Project,
+      e: React.MouseEvent<HTMLButtonElement>
+    ) => void;
+    sessionInfo?: SessionInfo;
+    hasSessionSupport: boolean;
   }) => (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
@@ -68,6 +87,39 @@ const ProjectCard = React.memo(
         ) : (
           <div className="w-full h-full flex items-center justify-center">
             <Code2 className="w-8 h-8 text-neutral-600" />
+          </div>
+        )}
+
+        {/* Status Badge */}
+        {project.status && (
+          <div className="absolute top-2 left-2">
+            <span
+              className={`px-2 py-1 text-xs rounded-full font-medium ${
+                project.status === "ready"
+                  ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                  : project.status === "building"
+                  ? "bg-yellow-500/20 text-yellow-400 border border-yellow-500/30"
+                  : project.status === "error"
+                  ? "bg-red-500/20 text-red-400 border border-red-500/30"
+                  : "bg-neutral-500/20 text-neutral-400 border border-neutral-500/30"
+              }`}
+            >
+              {project.status}
+            </span>
+          </div>
+        )}
+
+        {/* Activity Indicator */}
+        {sessionInfo?.hasActiveConversation && (
+          <div className="absolute top-2 right-2">
+            <div className="w-3 h-3 bg-blue-500 rounded-full animate-pulse"></div>
+          </div>
+        )}
+
+        {/* Compatibility Mode Indicator */}
+        {!hasSessionSupport && project.messageCount && project.messageCount > 0 && (
+          <div className="absolute top-2 right-2">
+            <div className="w-3 h-3 bg-yellow-500 rounded-full"></div>
           </div>
         )}
 
@@ -97,18 +149,73 @@ const ProjectCard = React.memo(
           </p>
         )}
 
+        {/* Session Info or Message Count */}
+        {hasSessionSupport && sessionInfo && sessionInfo.messageCount > 0 ? (
+          <div className="flex items-center gap-2 p-2 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+            <MessageSquare className="w-3 h-3 text-blue-400" />
+            <span className="text-xs text-blue-400">
+              {sessionInfo.messageCount} messages
+            </span>
+            <button
+              onClick={(e) => onContinueChat(project, e)}
+              className="text-xs text-blue-400 hover:text-blue-300 underline ml-auto"
+            >
+              Continue Chat
+            </button>
+          </div>
+        ) : !hasSessionSupport && project.messageCount && project.messageCount > 0 ? (
+          <div className="flex items-center gap-2 p-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg">
+            <AlertCircle className="w-3 h-3 text-yellow-400" />
+            <span className="text-xs text-yellow-400">
+              {project.messageCount} messages (legacy)
+            </span>
+            <button
+              onClick={(e) => onContinueChat(project, e)}
+              className="text-xs text-yellow-400 hover:text-yellow-300 underline ml-auto"
+            >
+              Continue
+            </button>
+          </div>
+        ) : null}
+
         <div className="flex items-center justify-between text-xs text-neutral-500">
           <div className="flex items-center gap-1">
             <Calendar className="w-3 h-3" />
             <span>{new Date(project.createdAt).toLocaleDateString()}</span>
           </div>
 
-          {project.deploymentUrl && (
-            <div className="flex items-center gap-1">
-              <ExternalLink className="w-3 h-3" />
-              <span>Live</span>
-            </div>
-          )}
+          <div className="flex items-center gap-3">
+            {hasSessionSupport && sessionInfo?.lastActivity && (
+              <div className="flex items-center gap-1">
+                <Activity className="w-3 h-3" />
+                <span>
+                  {new Date(sessionInfo.lastActivity).toLocaleDateString() === 
+                   new Date().toLocaleDateString() 
+                    ? new Date(sessionInfo.lastActivity).toLocaleTimeString([], { 
+                        hour: '2-digit', 
+                        minute: '2-digit' 
+                      })
+                    : new Date(sessionInfo.lastActivity).toLocaleDateString()
+                  }
+                </span>
+              </div>
+            )}
+            
+            {!hasSessionSupport && project.updatedAt && 
+             new Date(project.updatedAt).getTime() !== new Date(project.createdAt).getTime() && (
+              <div className="flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                <span>{new Date(project.updatedAt).toLocaleDateString()}</span>
+              </div>
+            )}
+            
+            {project.deploymentUrl && (
+              <div className="flex items-center gap-1">
+                <ExternalLink className="w-3 h-3" />
+                <span>Live</span>
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </motion.div>
@@ -124,9 +231,33 @@ const Index = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [loadingProjects, setLoadingProjects] = useState<boolean>(false);
   const [dbUser, setDbUser] = useState<DbUser | null>(null);
+  const [projectSessions, setProjectSessions] = useState<Record<number, SessionInfo>>({});
+  const [loadingSessions, setLoadingSessions] = useState<boolean>(false);
+  const [hasSessionSupport, setHasSessionSupport] = useState(true);
+  const [backendStatus, setBackendStatus] = useState<'checking' | 'available' | 'limited'>('checking');
 
   const navigate = useNavigate();
   const { user: clerkUser, isLoaded } = useUser();
+
+  // Check backend capabilities
+  const checkBackendCapabilities = useCallback(async () => {
+    try {
+      const response = await axios.get(`${BASE_URL}/health`);
+      const features = response.data.features || [];
+      
+      if (features.includes('Redis stateless sessions') || features.includes('Session-based conversations')) {
+        setHasSessionSupport(true);
+        setBackendStatus('available');
+      } else {
+        setHasSessionSupport(false);
+        setBackendStatus('limited');
+      }
+    } catch (error) {
+      console.warn("Could not check backend capabilities:", error);
+      setHasSessionSupport(false);
+      setBackendStatus('limited');
+    }
+  }, []);
 
   // Memoized handlers to prevent unnecessary re-renders
   const handlePromptChange = useCallback(
@@ -135,7 +266,6 @@ const Index = () => {
     },
     []
   );
-  console.log(BASE_URL, "base url");
 
   const handleProjectClick = useCallback(
     (project: Project) => {
@@ -143,27 +273,56 @@ const Index = () => {
         state: {
           projectId: project.id,
           existingProject: true,
+          sessionId: hasSessionSupport ? projectSessions[project.id]?.sessionId : project.lastSessionId,
         },
       });
     },
-    [navigate]
+    [navigate, projectSessions, hasSessionSupport]
+  );
+
+  const handleContinueChat = useCallback(
+    (project: Project, e: React.MouseEvent<HTMLButtonElement>) => {
+      e.stopPropagation();
+      navigate("/chatPage", {
+        state: {
+          projectId: project.id,
+          existingProject: true,
+          sessionId: hasSessionSupport ? projectSessions[project.id]?.sessionId : project.lastSessionId,
+        },
+      });
+    },
+    [navigate, projectSessions, hasSessionSupport]
   );
 
   const handleDeleteProject = useCallback(
     async (projectId: number, e: React.MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
 
-      if (!window.confirm("Are you sure you want to delete this project?"))
-        return;
+      const warningMessage = hasSessionSupport 
+        ? "Are you sure you want to delete this project? This will also delete all associated chat sessions and messages."
+        : "Are you sure you want to delete this project? This will also delete all associated messages.";
+
+      if (!window.confirm(warningMessage)) return;
 
       try {
+        // Delete project and associated data
         await axios.delete(`${BASE_URL}/api/projects/${projectId}`);
+        
+        // Remove from local state
         setProjects((prev) => prev.filter((p) => p.id !== projectId));
+        if (hasSessionSupport) {
+          setProjectSessions((prev) => {
+            const newSessions = { ...prev };
+            delete newSessions[projectId];
+            return newSessions;
+          });
+        }
       } catch (error) {
         console.error("Error deleting project:", error);
+        // Could add toast notification here
       }
     },
-    []
+    [hasSessionSupport]
   );
 
   const handleSubmit = useCallback(async () => {
@@ -175,33 +334,91 @@ const Index = () => {
     setIsLoading(true);
 
     try {
-      // Create project in database
+      // Create project in database with enhanced metadata
       const projectData = {
         userId: dbUser.id,
-        name: `Project ${new Date().toLocaleDateString()}`,
-        description: prompt,
+        name: `Project ${new Date().toLocaleDateString()} ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+        description: prompt.length > 100 ? prompt.substring(0, 100) + "..." : prompt,
         projectType: "frontend",
+        status: "pending",
       };
 
-      const projectResponse = await axios.post<Project>(
-        `${BASE_URL}/api/projects`,
-        projectData
-      );
-      const newProject = projectResponse.data;
+      let newProject;
+      try {
+        const projectResponse = await axios.post<Project>(
+          `${BASE_URL}/api/projects`,
+          projectData
+        );
+        newProject = projectResponse.data;
+      } catch (projectError) {
+        console.warn("Could not create project in database, proceeding without project ID");
+        // Navigate to chat page without project ID for now
+        navigate("/chatPage", {
+          state: {
+            prompt,
+            existingProject: false,
+          },
+        });
+        return;
+      }
 
       // Navigate to chat page with prompt and project ID
       navigate("/chatPage", {
         state: {
           prompt,
           projectId: newProject.id,
+          existingProject: false,
         },
       });
     } catch (error) {
-      console.error("Error:", error);
+      console.error("Error creating project:", error);
+      // Could add toast notification here
     } finally {
       setIsLoading(false);
     }
   }, [dbUser, prompt, navigate]);
+
+  // Fetch session information for projects (only if session support is available)
+  const fetchProjectSessions = useCallback(async (projectIds: number[]) => {
+    if (projectIds.length === 0 || !hasSessionSupport) return;
+
+    setLoadingSessions(true);
+    try {
+      const sessionPromises = projectIds.map(async (projectId) => {
+        try {
+          // Check if there's an active session for this project
+          const response = await axios.get(
+            `${BASE_URL}/api/conversation/project-status?projectId=${projectId}`
+          );
+          return {
+            projectId,
+            sessionInfo: response.data as SessionInfo,
+          };
+        } catch (error) {
+          // If no session exists for this project, that's okay
+          return {
+            projectId,
+            sessionInfo: null,
+          };
+        }
+      });
+
+      const results = await Promise.all(sessionPromises);
+      const sessionsMap: Record<number, SessionInfo> = {};
+
+      results.forEach(({ projectId, sessionInfo }) => {
+        if (sessionInfo) {
+          sessionsMap[projectId] = sessionInfo;
+        }
+      });
+
+      setProjectSessions(sessionsMap);
+    } catch (error) {
+      console.error("Error fetching project sessions:", error);
+    } finally {
+      setLoadingSessions(false);
+    }
+  }, [hasSessionSupport]);
 
   // Sync user with database and fetch projects
   useEffect(() => {
@@ -218,22 +435,49 @@ const Index = () => {
           profileImage: clerkUser.imageUrl || null,
         };
 
-        const userResponse = await axios.post<DbUser>(
-          `${BASE_URL}/api/users`,
-          userData
-        );
-        console.log(userResponse.data);
+        let userResponse;
+        try {
+          userResponse = await axios.post<DbUser>(
+            `${BASE_URL}/api/users`,
+            userData
+          );
+        } catch (userError) {
+          console.warn("Users endpoint not available, using fallback user data");
+          // Create a fallback user object for development
+          userResponse = {
+            data: {
+              id: 1, // Fallback ID
+              clerkId: clerkUser.id,
+              email: userData.email,
+              name: userData.name,
+              phoneNumber: userData.phoneNumber,
+              profileImage: userData.profileImage,
+            }
+          };
+        }
 
         setDbUser(userResponse.data);
 
         // Fetch user's projects
         setLoadingProjects(true);
-        const projectsResponse = await axios.get<Project[]>(
-          `${BASE_URL}/api/projects/user/${userResponse.data.id}`
-        );
-        console.log(projectsResponse.data);
+        try {
+          const projectsResponse = await axios.get<Project[]>(
+            `${BASE_URL}/api/projects/user/${userResponse.data.id}`
+          );
 
-        setProjects(projectsResponse.data);
+          const fetchedProjects = projectsResponse.data;
+          setProjects(fetchedProjects);
+
+          // Fetch session information for all projects (if session support is available)
+          if (fetchedProjects.length > 0 && hasSessionSupport) {
+            const projectIds = fetchedProjects.map(p => p.id);
+            await fetchProjectSessions(projectIds);
+          }
+        } catch (projectError) {
+          console.warn("Could not fetch projects:", projectError);
+          setProjects([]); // Set empty array as fallback
+        }
+
       } catch (error) {
         console.error("Error syncing user or fetching projects:", error);
       } finally {
@@ -242,11 +486,67 @@ const Index = () => {
     };
 
     syncUserAndFetchProjects();
-  }, [clerkUser, isLoaded]);
+  }, [clerkUser, isLoaded, fetchProjectSessions, hasSessionSupport]);
+
+  // Check backend capabilities on load
+  useEffect(() => {
+    checkBackendCapabilities();
+  }, [checkBackendCapabilities]);
+
+  // Refresh session data periodically (only if session support is available)
+  useEffect(() => {
+    if (projects.length === 0 || !hasSessionSupport) return;
+
+    const interval = setInterval(() => {
+      const projectIds = projects.map(p => p.id);
+      fetchProjectSessions(projectIds);
+    }, 30000); // Refresh every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [projects, fetchProjectSessions, hasSessionSupport]);
 
   // Memoized project cards to prevent re-rendering on prompt change
   const memoizedProjectCards = useMemo(() => {
-    return projects.map((project, index) => (
+    // Sort projects by activity or message count depending on session support
+    const sortedProjects = [...projects].sort((a, b) => {
+      if (hasSessionSupport) {
+        const aSession = projectSessions[a.id];
+        const bSession = projectSessions[b.id];
+        
+        // Projects with active sessions first
+        if (aSession?.hasActiveConversation && !bSession?.hasActiveConversation) return -1;
+        if (!aSession?.hasActiveConversation && bSession?.hasActiveConversation) return 1;
+        
+        // Then by last activity if both have sessions
+        if (aSession?.lastActivity && bSession?.lastActivity) {
+          return new Date(bSession.lastActivity).getTime() - new Date(aSession.lastActivity).getTime();
+        }
+        
+        // Projects with sessions before those without
+        if (aSession && !bSession) return -1;
+        if (!aSession && bSession) return 1;
+      } else {
+        // Sort by message count and last update for legacy mode
+        const aMessages = a.messageCount || 0;
+        const bMessages = b.messageCount || 0;
+        
+        if (aMessages !== bMessages) {
+          return bMessages - aMessages; // More messages first
+        }
+        
+        // Then by update time
+        const aTime = new Date(a.updatedAt || a.createdAt).getTime();
+        const bTime = new Date(b.updatedAt || b.createdAt).getTime();
+        if (aTime !== bTime) {
+          return bTime - aTime; // More recent first
+        }
+      }
+      
+      // Finally by creation date (newest first)
+      return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+    });
+
+    return sortedProjects.map((project, index) => (
       <motion.div
         key={project.id}
         initial={{ opacity: 0, y: 20 }}
@@ -257,19 +557,54 @@ const Index = () => {
           project={project}
           onProjectClick={handleProjectClick}
           onDeleteProject={handleDeleteProject}
+          onContinueChat={handleContinueChat}
+          sessionInfo={projectSessions[project.id]}
+          hasSessionSupport={hasSessionSupport}
         />
       </motion.div>
     ));
-  }, [projects, handleProjectClick, handleDeleteProject]);
+  }, [projects, projectSessions, handleProjectClick, handleDeleteProject, handleContinueChat, hasSessionSupport]);
 
   // Memoized project stats
-  const projectStats = useMemo(
-    () => ({
+  const projectStats = useMemo(() => {
+    const activeProjects = projects.filter(p => p.status === "ready").length;
+    
+    let projectsWithChats = 0;
+    let totalMessages = 0;
+    
+    if (hasSessionSupport) {
+      projectsWithChats = Object.keys(projectSessions).length;
+      totalMessages = Object.values(projectSessions).reduce(
+        (sum, session) => sum + (session?.messageCount || 0), 
+        0
+      );
+    } else {
+      projectsWithChats = projects.filter(p => (p.messageCount || 0) > 0).length;
+      totalMessages = projects.reduce((sum, p) => sum + (p.messageCount || 0), 0);
+    }
+
+    return {
       count: projects.length,
-      text: `${projects.length} project${projects.length !== 1 ? "s" : ""}`,
-    }),
-    [projects.length]
-  );
+      active: activeProjects,
+      withChats: projectsWithChats,
+      totalMessages,
+      text: `${projects.length} project${projects.length !== 1 ? "s" : ""} • ${activeProjects} ready`,
+      chatsText: projectsWithChats > 0 ? ` • ${projectsWithChats} with chats` : "",
+      messagesText: totalMessages > 0 ? ` • ${totalMessages} messages` : "",
+    };
+  }, [projects, projectSessions, hasSessionSupport]);
+
+  // Handle keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && prompt.trim()) {
+        handleSubmit();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [prompt, handleSubmit]);
 
   return (
     <>
@@ -308,6 +643,29 @@ const Index = () => {
           </SignedIn>
         </motion.header>
 
+        {/* Backend Status Indicator */}
+        {backendStatus !== 'checking' && (
+          <motion.div
+            initial={{ y: -20, opacity: 0 }}
+            animate={{ y: 0, opacity: 1 }}
+            transition={{ duration: 0.8, delay: 0.4 }}
+            className="absolute top-6 left-6 z-20"
+          >
+            <div className={`px-3 py-2 rounded-lg border text-xs font-medium ${
+              backendStatus === 'available'
+                ? 'bg-green-500/10 border-green-500/20 text-green-400'
+                : 'bg-yellow-500/10 border-yellow-500/20 text-yellow-400'
+            }`}>
+              <div className="flex items-center gap-2">
+                <div className={`w-2 h-2 rounded-full ${
+                  backendStatus === 'available' ? 'bg-green-500' : 'bg-yellow-500'
+                }`}></div>
+                {backendStatus === 'available' ? 'Full Features' : 'Basic Mode'}
+              </div>
+            </div>
+          </motion.div>
+        )}
+
         {/* Main Content Container */}
         <div className="relative z-10 w-full max-w-6xl mx-auto px-6">
           {/* Title */}
@@ -339,6 +697,21 @@ const Index = () => {
             </motion.span>
           </motion.h1>
 
+          {/* Backend Status Message */}
+          {backendStatus === 'limited' && (
+            <motion.div
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ duration: 0.8, delay: 1.0 }}
+              className="mb-8 text-center"
+            >
+              <div className="inline-flex items-center gap-2 px-4 py-2 bg-yellow-500/10 border border-yellow-500/20 rounded-lg text-yellow-400 text-sm">
+                <AlertCircle className="w-4 h-4" />
+                Running in compatibility mode - some advanced features may be unavailable
+              </div>
+            </motion.div>
+          )}
+
           {/* Content only visible when signed in */}
           <SignedIn>
             {/* Prompt Input Section */}
@@ -357,8 +730,8 @@ const Index = () => {
                 }}
                 value={prompt}
                 onChange={handlePromptChange}
-                placeholder="Enter your prompt here..."
-                className="mb-4 border-2 focus:outline-0 border-neutral-400 rounded-lg text-neutral-500 p-3 w-full max-w-2xl h-36 bg-black/50 backdrop-blur-sm transition-all duration-300"
+                placeholder="Describe your project idea... (Ctrl/Cmd + Enter to create)"
+                className="mb-4 border-2 focus:outline-0 border-neutral-400 rounded-lg text-white p-3 w-full max-w-2xl h-36 bg-black/50 backdrop-blur-sm transition-all duration-300 placeholder-neutral-500"
               />
 
               <motion.button
@@ -374,7 +747,7 @@ const Index = () => {
                   boxShadow: "0 10px 25px rgba(96, 165, 250, 0.3)",
                 }}
                 whileTap={{ scale: 0.95 }}
-                className="w-fit px-7 rounded-lg py-2 bg-blue-400 hover:bg-blue-500 transition-all duration-300 disabled:opacity-50"
+                className="w-fit px-7 rounded-lg py-2 bg-blue-400 hover:bg-blue-500 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium"
                 onClick={handleSubmit}
                 disabled={isLoading || !prompt.trim()}
               >
@@ -416,7 +789,7 @@ const Index = () => {
               </motion.button>
             </div>
 
-            {/* Projects Section - Memoized to prevent re-renders */}
+            {/* Projects Section */}
             <motion.div
               initial={{ y: 50, opacity: 0 }}
               animate={{ y: 0, opacity: 1 }}
@@ -431,9 +804,18 @@ const Index = () => {
                 <h2 className="text-2xl font-semibold text-white">
                   Your Projects
                 </h2>
-                <span className="text-neutral-400 text-sm">
-                  {projectStats.text}
-                </span>
+                <div className="text-right">
+                  <div className="text-neutral-400 text-sm">
+                    {projectStats.text}
+                    {projectStats.chatsText}
+                  </div>
+                  {projectStats.totalMessages > 0 && (
+                    <div className="text-neutral-500 text-xs">
+                      {projectStats.totalMessages} total messages
+                      {!hasSessionSupport && " (legacy)"}
+                    </div>
+                  )}
+                </div>
               </div>
 
               {loadingProjects ? (
@@ -449,9 +831,25 @@ const Index = () => {
                   />
                 </div>
               ) : projects.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
-                  {memoizedProjectCards}
-                </div>
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                    {memoizedProjectCards}
+                  </div>
+                  {hasSessionSupport && loadingSessions && (
+                    <div className="flex items-center justify-center mt-4">
+                      <motion.div
+                        animate={{ rotate: 360 }}
+                        transition={{
+                          duration: 1,
+                          repeat: Infinity,
+                          ease: "linear",
+                        }}
+                        className="w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full mr-2"
+                      />
+                      <span className="text-neutral-400 text-sm">Loading chat sessions...</span>
+                    </div>
+                  )}
+                </>
               ) : (
                 <motion.div
                   initial={{ opacity: 0 }}
