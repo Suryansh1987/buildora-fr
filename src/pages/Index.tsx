@@ -31,9 +31,10 @@ interface DbUser {
   clerkId: string;
   email: string;
   name: string;
-  phoneNumber?: string;
-  profileImage?: string;
+  phoneNumber: string | null;  // ✅ Now allows null
+  profileImage?: string;       // Optional
 }
+
 
 interface SessionInfo {
   sessionId: string;
