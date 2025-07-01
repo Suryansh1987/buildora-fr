@@ -7,8 +7,15 @@ import React, {
 } from "react";
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
-import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle } from "lucide-react";
+import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink } from "lucide-react";
 import { useLocation } from "react-router-dom";
+
+type ProjectInfo = {
+  id: number | null;
+  name: string | null;
+  matchReason: string | null;
+  isVerified: boolean;
+};
 
 interface LocationState {
   prompt?: string;
@@ -19,8 +26,12 @@ interface LocationState {
 
 interface Project {
   id: number;
+  name?: string;
+  description?: string;
   deploymentUrl?: string;
   status?: "pending" | "building" | "ready" | "error";
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface Message {
@@ -53,14 +64,16 @@ interface ConversationStats {
 }
 
 const ChatPage: React.FC = () => {
-  const { value } = useContext(MyContext) as ContextValue;
+  const context = useContext(MyContext);
+  const { value } = context as ContextValue;
+  
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState<string>("");
   const [isLoading, setIsLoading] = useState(false);
   const [previewUrl, setPreviewUrl] = useState<string>("");
   const [error, setError] = useState<string>("");
   const [projectStatus, setProjectStatus] = useState<
-    "idle" | "loading" | "ready" | "error"
+    "idle" | "loading" | "ready" | "error" | "fetching"
   >("idle");
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [currentSummary, setCurrentSummary] = useState<ConversationSummary | null>(null);
@@ -69,8 +82,17 @@ const ChatPage: React.FC = () => {
   const [hasSessionSupport, setHasSessionSupport] = useState(true);
   const [isServerHealthy, setIsServerHealthy] = useState<boolean | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [currentProject, setCurrentProject] = useState<Project | null>(null);
+  
+  // NEW: Project matching state
+  const [currentProjectInfo, setCurrentProjectInfo] = useState<ProjectInfo>({
+    id: null,
+    name: null,
+    matchReason: null,
+    isVerified: false,
+  });
 
-  // Refs to prevent duplicate API calls - ENHANCED
+  // Refs to prevent duplicate API calls
   const hasInitialized = useRef(false);
   const isGenerating = useRef(false);
   const currentProjectId = useRef<number | null>(null);
@@ -99,7 +121,132 @@ const ChatPage: React.FC = () => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
 
-  // Server health check - ENHANCED to prevent duplicate calls
+  // NEW: Get deployed app URL from current context
+  const getDeployedAppUrl = useCallback((): string | undefined => {
+    // Priority 1: Use preview URL if it's a deployed URL
+    if (previewUrl && !previewUrl.includes('localhost')) {
+      return previewUrl;
+    }
+    
+    // Priority 2: Check if current page is on a deployed domain
+    const hostname = window.location.hostname;
+    
+    if (hostname.includes('azurestaticapps.net') || 
+        hostname.includes('ashy-') || // Azure Static Web Apps pattern
+        hostname.includes('netlify.app') ||
+        hostname.includes('vercel.app') ||
+        !hostname.includes('localhost')) {
+      return window.location.origin;
+    }
+    
+    // Priority 3: Check stored project data
+    const storedProject = sessionStorage.getItem('currentProject');
+    if (storedProject) {
+      try {
+        const project = JSON.parse(storedProject);
+        return project.deploymentUrl;
+      } catch (e) {
+        console.warn('Failed to parse stored project data');
+      }
+    }
+    
+    // Priority 4: Check URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const deployedUrl = urlParams.get('deployedUrl');
+    if (deployedUrl) {
+      return deployedUrl;
+    }
+    
+    return undefined;
+  }, [previewUrl]);
+
+  // NEW: Get current user ID (replace with your actual auth logic)
+  const getCurrentUserId = useCallback((): number => {
+    // TODO: Replace with your actual authentication system
+    const storedUserId = localStorage.getItem('userId');
+    if (storedUserId && !isNaN(parseInt(storedUserId))) {
+      return parseInt(storedUserId);
+    }
+    
+    // Fallback user ID - replace with actual logic
+    return 1;
+  }, []);
+
+  // NEW: Verify project by URL
+  const verifyProjectByUrl = useCallback(async (): Promise<{
+    hasMatch: boolean;
+    project: any | null;
+    matchReason: string;
+  }> => {
+    const deployedUrl = getDeployedAppUrl();
+    
+    if (!deployedUrl) {
+      return {
+        hasMatch: false,
+        project: null,
+        matchReason: 'no_deployed_url'
+      };
+    }
+    
+    try {
+      console.log(`🔍 Verifying project for URL: ${deployedUrl}`);
+      
+      const userId = getCurrentUserId();
+      
+      const response = await axios.get(
+        `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}`,
+        { timeout: 5000 }
+      );
+      
+      const result = response.data;
+      
+      if (result.success && result.data.hasMatch) {
+        console.log('✅ Project verified for current URL:', result.data.project.name);
+        setCurrentProjectInfo({
+          id: result.data.project.id,
+          name: result.data.project.name,
+          matchReason: 'url_match',
+          isVerified: true
+        });
+        
+        return {
+          hasMatch: true,
+          project: result.data.project,
+          matchReason: 'url_match'
+        };
+      } else {
+        console.log('⚠️ No project found for current URL');
+        setCurrentProjectInfo({
+          id: null,
+          name: null,
+          matchReason: 'no_url_match',
+          isVerified: true
+        });
+        
+        return {
+          hasMatch: false,
+          project: null,
+          matchReason: 'no_url_match'
+        };
+      }
+    } catch (error) {
+      console.error('Failed to verify project by URL:', error);
+      setCurrentProjectInfo({
+        id: null,
+        name: null,
+        matchReason: 'verification_error',
+        isVerified: false
+      });
+      
+      return {
+        hasMatch: false,
+        project: null,
+        matchReason: 'verification_error'
+      };
+    }
+  }, [baseUrl, getDeployedAppUrl, getCurrentUserId]);
+
+  // Server health check
   const checkServerHealth = useCallback(async () => {
     if (healthCheckDone.current) {
       return isServerHealthy;
@@ -122,7 +269,7 @@ const ChatPage: React.FC = () => {
       
       if (axios.isAxiosError(error)) {
         if (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK') {
-          setError("Backend server is not responding. Please ensure it's running on port 3001.");
+          setError("Backend server is not responding. Please ensure it's running on the correct port.");
         } else {
           setError(`Server error: ${error.response?.status || 'Unknown'}`);
         }
@@ -133,43 +280,125 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, isServerHealthy]);
 
-  // Retry connection with loading state
-  const retryConnection = useCallback(async () => {
-    setIsRetrying(true);
-    setError("");
-    setProjectStatus("loading");
-    
-    // Reset all refs
-    healthCheckDone.current = false;
-    sessionInitialized.current = false;
-    projectLoaded.current = false;
-    hasInitialized.current = false;
-    
-    try {
-      const isHealthy = await checkServerHealth();
-      if (isHealthy) {
-        // Retry initialization
-        await initializeSession();
-        
-        if (existingProject && projectId) {
-          await fetchProjectDeploymentUrl(projectId);
-        } else if (navPrompt && projectId) {
-          setPrompt(navPrompt);
-          await generateCode(navPrompt, projectId);
-        } else {
-          setProjectStatus("idle");
-        }
-        hasInitialized.current = true;
+  // Enhanced function to fetch project details and deployment URL
+  const fetchReadyProject = useCallback(
+    async (projId: number) => {
+      if (currentProjectId.current === projId && projectStatus !== "idle") {
+        return;
       }
-    } catch (error) {
-      setError("Still cannot connect to server. Please check your backend setup.");
-      setProjectStatus("error");
-    } finally {
-      setIsRetrying(false);
-    }
-  }, [checkServerHealth]);
+      
+      setError("");
+      setProjectStatus("fetching");
+      currentProjectId.current = projId;
 
-  // Initialize or get session - ENHANCED to prevent duplicate calls
+      try {
+        console.log(`🔍 Fetching project details for ID: ${projId}`);
+        
+        const res = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
+        const project = res.data;
+        
+        console.log("📋 Project details:", project);
+        setCurrentProject(project);
+
+        // Check project status and handle accordingly
+        if (project.status === "ready" && project.deploymentUrl) {
+          console.log("✅ Project is ready with deployment URL:", project.deploymentUrl);
+          setPreviewUrl(project.deploymentUrl);
+          setProjectStatus("ready");
+        } else if (project.status === "building") {
+          console.log("🔨 Project is still building, will poll for updates");
+          setProjectStatus("loading");
+          // Start polling for project readiness
+          await pollProjectStatus(projId);
+        } else if (project.status === "pending") {
+          console.log("⏳ Project is pending, waiting for build to start");
+          setProjectStatus("loading");
+          await pollProjectStatus(projId);
+        } else if (project.status === "error") {
+          setError("Project build failed. Please try regenerating the project.");
+          setProjectStatus("error");
+        } else {
+          // Project exists but no deployment URL yet
+          console.log("📝 Project found but deployment not ready, starting build...");
+          
+          // Try to trigger a build if there's a prompt available
+          if (navPrompt) {
+            console.log("🚀 Triggering build with navigation prompt");
+            await generateCode(navPrompt, projId);
+          } else {
+            setError("Project found, but deployment is not ready and no prompt available to rebuild.");
+            setProjectStatus("error");
+          }
+        }
+      } catch (error) {
+        console.error("❌ Error fetching project:", error);
+        
+        if (axios.isAxiosError(error)) {
+          if (error.response?.status === 404) {
+            setError(`Project with ID ${projId} not found.`);
+          } else if (error.code === 'ERR_NETWORK') {
+            setError("Cannot connect to server");
+          } else {
+            setError(`Failed to load project: ${error.response?.data?.message || error.message}`);
+          }
+        } else {
+          setError("Failed to load project due to an unexpected error");
+        }
+        setProjectStatus("error");
+      }
+    },
+    [baseUrl, projectStatus, navPrompt]
+  );
+
+  // Poll project status until it's ready
+  const pollProjectStatus = useCallback(
+    async (projId: number, maxAttempts: number = 30) => {
+      let attempts = 0;
+      
+      const poll = async (): Promise<void> => {
+        try {
+          attempts++;
+          console.log(`🔄 Polling project status (attempt ${attempts}/${maxAttempts})`);
+          
+          const res = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
+          const project = res.data;
+          
+          setCurrentProject(project);
+          
+          if (project.status === "ready" && project.deploymentUrl) {
+            console.log("✅ Project is now ready!");
+            setPreviewUrl(project.deploymentUrl);
+            setProjectStatus("ready");
+            return;
+          } else if (project.status === "error") {
+            setError("Project build failed during polling.");
+            setProjectStatus("error");
+            return;
+          } else if (attempts >= maxAttempts) {
+            setError("Project is taking too long to build. Please check back later.");
+            setProjectStatus("error");
+            return;
+          }
+          
+          // Continue polling
+          setTimeout(poll, 3000); // Poll every 3 seconds
+        } catch (error) {
+          console.error("Error during polling:", error);
+          if (attempts >= maxAttempts) {
+            setError("Failed to check project status");
+            setProjectStatus("error");
+          } else {
+            setTimeout(poll, 5000); // Retry with longer interval
+          }
+        }
+      };
+      
+      poll();
+    },
+    [baseUrl]
+  );
+
+  // Initialize or get session
   const initializeSession = useCallback(async () => {
     if (sessionInitialized.current) {
       console.log("🔄 Session already initialized, skipping...");
@@ -255,7 +484,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl]);
 
-  // Load project messages - ENHANCED to prevent duplicate calls
+  // Load project messages (enhanced with better error handling)
   const loadProjectMessages = useCallback(async (projectId: number) => {
     if (projectLoaded.current) {
       console.log("🔄 Project messages already loaded, skipping...");
@@ -350,46 +579,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, messages.length, loadCurrentSummary, loadConversationStats, hasSessionSupport]);
 
-  // Memoized function to fetch project deployment URL - ENHANCED
-  const fetchProjectDeploymentUrl = useCallback(
-    async (projId: number) => {
-      if (currentProjectId.current === projId && projectStatus !== "idle") {
-        console.log("🔄 Project already being loaded or loaded, skipping...");
-        return;
-      }
-      
-      setError("");
-      setProjectStatus("loading");
-      currentProjectId.current = projId;
-
-      try {
-        console.log(`🏗️ Fetching project ${projId} deployment URL...`);
-        const res = await axios.get<Project>(
-          `${baseUrl}/api/projects/${projId}`
-        );
-        const project = res.data;
-        if (project.deploymentUrl) {
-          setPreviewUrl(project.deploymentUrl);
-          setProjectStatus("ready");
-          console.log(`✅ Project ${projId} loaded:`, project.deploymentUrl);
-        } else {
-          setError("Project found, but deployment is not ready.");
-          setProjectStatus("error");
-        }
-      } catch (error) {
-        console.error("Error fetching project:", error);
-        if (axios.isAxiosError(error) && error.code === 'ERR_NETWORK') {
-          setError("Cannot connect to server");
-        } else {
-          setError("Failed to load project");
-        }
-        setProjectStatus("error");
-      }
-    },
-    [baseUrl, projectStatus]
-  );
-
-  // Memoized function to generate code - ENHANCED
+  // Memoized function to generate code
   const generateCode = useCallback(
     async (userPrompt: string, projId?: number) => {
       if (isGenerating.current) {
@@ -419,6 +609,10 @@ const ChatPage: React.FC = () => {
               deploymentUrl: response.data.previewUrl,
               status: "ready",
             });
+            
+            // Refresh project details
+            const updatedProject = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
+            setCurrentProject(updatedProject.data);
           } catch (updateError) {
             console.warn("Could not update project:", updateError);
           }
@@ -438,15 +632,48 @@ const ChatPage: React.FC = () => {
     [baseUrl]
   );
 
-  // FIX 1: Check if we should run initialization only for new prompts or project changes
+  // Check if we should run initialization
   const shouldInitialize = useCallback(() => {
-    // Only initialize if:
-    // 1. Not already initialized AND
-    // 2. We have a navigation prompt (new generation request) OR existingProject is true
     return !hasInitialized.current && (navPrompt || existingProject);
   }, [navPrompt, existingProject]);
 
-  // MAIN INITIALIZATION - ENHANCED to prevent regeneration on refresh
+  // Retry connection with loading state
+  const retryConnection = useCallback(async () => {
+    setIsRetrying(true);
+    setError("");
+    setProjectStatus("loading");
+    
+    // Reset all refs
+    healthCheckDone.current = false;
+    sessionInitialized.current = false;
+    projectLoaded.current = false;
+    hasInitialized.current = false;
+    
+    try {
+      const isHealthy = await checkServerHealth();
+      if (isHealthy) {
+        // Retry initialization
+        await initializeSession();
+        
+        if (existingProject && projectId) {
+          await fetchReadyProject(projectId);
+        } else if (navPrompt && projectId) {
+          setPrompt(navPrompt);
+          await generateCode(navPrompt, projectId);
+        } else {
+          setProjectStatus("idle");
+        }
+        hasInitialized.current = true;
+      }
+    } catch (error) {
+      setError("Still cannot connect to server. Please check your backend setup.");
+      setProjectStatus("error");
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [checkServerHealth, initializeSession, fetchReadyProject, generateCode, existingProject, projectId, navPrompt]);
+
+  // MAIN INITIALIZATION
   useEffect(() => {
     if (!shouldInitialize()) {
       console.log("🔄 Skipping initialization - no new generation or existing project load needed");
@@ -460,7 +687,10 @@ const ChatPage: React.FC = () => {
           const serverHealthy = await checkServerHealth();
           if (serverHealthy) {
             await initializeSession();
-            await fetchProjectDeploymentUrl(projectId);
+            await fetchReadyProject(projectId);
+            
+            // Verify if this matches current URL
+            await verifyProjectByUrl();
           }
         };
         
@@ -483,12 +713,20 @@ const ChatPage: React.FC = () => {
       }
 
       // Initialize session
-      const currentSessionId = await initializeSession();
+      await initializeSession();
       
-      // Handle project loading
+      // Verify project by URL before loading
+      const urlVerification = await verifyProjectByUrl();
+      
+      // Handle project loading with URL context
       if (existingProject && projectId) {
         console.log("📂 Loading existing project...");
-        await fetchProjectDeploymentUrl(projectId);
+        await fetchReadyProject(projectId);
+        
+        // Check if loaded project matches URL
+        if (!urlVerification.hasMatch && urlVerification.matchReason === 'no_url_match') {
+          console.warn("⚠️ Loaded project doesn't match current URL context");
+        }
       } else if (navPrompt && projectId) {
         console.log("🎨 Generating new project...");
         setPrompt(navPrompt);
@@ -502,9 +740,9 @@ const ChatPage: React.FC = () => {
     };
 
     initializeWithHealthCheck();
-  }, [shouldInitialize, checkServerHealth, initializeSession, fetchProjectDeploymentUrl, generateCode, existingProject, projectId, navPrompt]);
+  }, [shouldInitialize, checkServerHealth, initializeSession, fetchReadyProject, generateCode, existingProject, projectId, navPrompt, verifyProjectByUrl]);
 
-  // FIX 2: Refresh preview URL after modifications
+  // Refresh preview URL after modifications
   const refreshPreviewUrl = useCallback(async () => {
     if (!projectId) return;
     
@@ -516,6 +754,7 @@ const ChatPage: React.FC = () => {
       if (project.deploymentUrl && project.deploymentUrl !== previewUrl) {
         console.log("🔄 Preview URL updated:", project.deploymentUrl);
         setPreviewUrl(project.deploymentUrl);
+        setCurrentProject(project);
         
         // Add a small delay to ensure the new deployment is ready
         setTimeout(() => {
@@ -530,7 +769,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, projectId, previewUrl]);
 
-  // Handle streaming response
+  // Enhanced streaming response with URL context
   const handleStreamingResponse = useCallback(async (
     currentPrompt: string, 
     currentSessionId: string
@@ -549,6 +788,19 @@ const ChatPage: React.FC = () => {
       
       setMessages((prev) => [...prev, streamingMessage]);
 
+      // Include URL context in request
+      const deployedUrl = getDeployedAppUrl();
+      const userId = getCurrentUserId();
+      
+      console.log('🚀 Sending modification request with URL context:', {
+        prompt: currentPrompt.substring(0, 50) + '...',
+        sessionId: currentSessionId,
+        userId: userId,
+        projectId: currentProjectInfo.id || projectId,
+        currentUrl: window.location.href,
+        deployedUrl: deployedUrl
+      });
+
       const response = await fetch(`${baseUrl}/api/modify/stream`, {
         method: 'POST',
         headers: {
@@ -557,7 +809,10 @@ const ChatPage: React.FC = () => {
         body: JSON.stringify({
           prompt: currentPrompt,
           sessionId: currentSessionId,
-          projectId: projectId,
+          userId: userId,
+          projectId: currentProjectInfo.id || projectId,
+          currentUrl: window.location.href,
+          deployedUrl: deployedUrl,
           projectStructure: value,
         }),
       });
@@ -572,6 +827,7 @@ const ChatPage: React.FC = () => {
       }
 
       let accumulatedContent = '';
+      let lastProjectInfo: any = null;
       
       while (true) {
         const { done, value: chunk } = await reader.read();
@@ -584,6 +840,16 @@ const ChatPage: React.FC = () => {
           if (line.startsWith('data: ')) {
             try {
               const data = JSON.parse(line.slice(6));
+              
+              // Handle progress events with project info
+              if (data.message && data.projectId) {
+                lastProjectInfo = {
+                  id: data.projectId,
+                  name: data.projectName,
+                  matchReason: data.matchReason
+                };
+              }
+              
               if (data.content) {
                 accumulatedContent += data.content;
                 
@@ -603,6 +869,16 @@ const ChatPage: React.FC = () => {
         }
       }
 
+      // Update project info if we got it from the response
+      if (lastProjectInfo) {
+        setCurrentProjectInfo({
+          id: lastProjectInfo.id,
+          name: lastProjectInfo.name,
+          matchReason: lastProjectInfo.matchReason,
+          isVerified: true
+        });
+      }
+
       // Finalize the streaming message
       setMessages((prev) => 
         prev.map((msg) => 
@@ -612,7 +888,7 @@ const ChatPage: React.FC = () => {
         )
       );
 
-      // FIX 2: Refresh preview after streaming completes
+      // Refresh preview after streaming completes
       await refreshPreviewUrl();
 
     } catch (error) {
@@ -633,9 +909,9 @@ const ChatPage: React.FC = () => {
     } finally {
       setIsStreamingResponse(false);
     }
-  }, [baseUrl, value, projectId, refreshPreviewUrl]);
+  }, [baseUrl, value, projectId, currentProjectInfo.id, refreshPreviewUrl, getDeployedAppUrl, getCurrentUserId]);
 
-  // Save message to backend (enhanced)
+  // Save message to backend
   const saveMessage = useCallback(async (content: string, role: 'user' | 'assistant') => {
     if (!projectId) return;
 
@@ -672,6 +948,103 @@ const ChatPage: React.FC = () => {
       }
     }
   }, [baseUrl, projectId, sessionId, hasSessionSupport]);
+
+  // Enhanced non-streaming submit with URL context
+  const handleNonStreamingSubmit = useCallback(
+    async (currentPrompt: string) => {
+      try {
+        const deployedUrl = getDeployedAppUrl();
+        const userId = getCurrentUserId();
+
+        console.log('🚀 Sending non-streaming modification request with URL context:', {
+          prompt: currentPrompt.substring(0, 50) + '...',
+          sessionId,
+          userId,
+          projectId: currentProjectInfo?.id || projectId,
+          currentUrl: window.location.href,
+          deployedUrl
+        });
+
+        const response = await axios.post(`${baseUrl}/api/modify`, {
+          prompt: currentPrompt,
+          sessionId,
+          userId,
+          projectId: currentProjectInfo?.id || projectId,
+          currentUrl: window.location.href,
+          deployedUrl,
+          projectStructure: value,
+        });
+
+        let responseContent = "Changes applied successfully!";
+
+        if (response.data && response.data.data) {
+          const data = response.data.data;
+
+          if (data.projectId && data.projectAction) {
+            setCurrentProjectInfo((prev: ProjectInfo) => ({
+              id: data.projectId,
+              name: data.projectName || prev?.name,
+              matchReason: data.projectMatchReason || data.projectAction,
+              isVerified: true,
+            }));
+          }
+        }
+
+        // Try to extract meaningful response from the API
+        if (response.data && response.data.content) {
+          if (typeof response.data.content === 'string') {
+            responseContent = response.data.content;
+          } else if (Array.isArray(response.data.content) && response.data.content.length > 0) {
+            responseContent = response.data.content[0].text || responseContent;
+          }
+        } else if (response.data && response.data.message) {
+          responseContent = response.data.message;
+        }
+
+        const assistantMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          content: responseContent,
+          type: "assistant",
+          timestamp: new Date(),
+        };
+
+        setMessages((prev) => [...prev, assistantMessage]);
+        await saveMessage(assistantMessage.content, 'assistant');
+
+        // Refresh preview after modifications
+        await refreshPreviewUrl();
+
+      } catch (error: any) {
+        console.error("❌ Error in non-streaming submission:", error.message || error);
+        
+        // Try to provide helpful error information
+        let errorMessage = "Sorry, I encountered an error while applying the changes.";
+        
+        if (axios.isAxiosError(error)) {
+          if (error.response?.status === 501) {
+            errorMessage = "This feature is currently unavailable. The modification service needs to be configured.";
+          } else if (error.response?.data?.message) {
+            errorMessage = `Error: ${error.response.data.message}`;
+          } else if (error.code === 'ERR_NETWORK') {
+            errorMessage = "Cannot connect to server. Please check your connection.";
+          }
+        }
+        
+        const assistantErrorMessage: Message = {
+          id: (Date.now() + 1).toString(),
+          content: errorMessage,
+          type: "assistant",
+          timestamp: new Date(),
+        };
+
+        setMessages((prev) => [...prev, assistantErrorMessage]);
+        await saveMessage(assistantErrorMessage.content, 'assistant');
+        
+        throw error;
+      }
+    },
+    [sessionId, currentProjectInfo, projectId, value, baseUrl, getDeployedAppUrl, getCurrentUserId, saveMessage, refreshPreviewUrl]
+  );
 
   // Handle user prompt for code changes
   const handleSubmit = useCallback(async () => {
@@ -721,74 +1094,7 @@ const ChatPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary]);
-
-  // Non-streaming submit handler (enhanced)
-  const handleNonStreamingSubmit = useCallback(async (currentPrompt: string) => {
-    try {
-      // Use the new API endpoint instead of legacy /modify
-      const response = await axios.post(`${baseUrl}/api/modify`, {
-        prompt: currentPrompt,
-        sessionId: sessionId,
-        projectId: projectId,
-        projectStructure: value,
-      });
-
-      let responseContent = "Changes applied successfully!";
-      
-      // Try to extract meaningful response from the API
-      if (response.data && response.data.content) {
-        if (typeof response.data.content === 'string') {
-          responseContent = response.data.content;
-        } else if (Array.isArray(response.data.content) && response.data.content.length > 0) {
-          responseContent = response.data.content[0].text || responseContent;
-        }
-      } else if (response.data && response.data.message) {
-        responseContent = response.data.message;
-      }
-
-      const assistantMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: responseContent,
-        type: "assistant",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, assistantMessage]);
-      await saveMessage(assistantMessage.content, 'assistant');
-      
-      // FIX 2: Refresh preview after non-streaming modification
-      await refreshPreviewUrl();
-      
-    } catch (error) {
-      console.error("Error in non-streaming modification:", error);
-      
-      // Try to provide helpful error information
-      let errorMessage = "Sorry, I encountered an error while applying the changes.";
-      
-      if (axios.isAxiosError(error)) {
-        if (error.response?.status === 501) {
-          errorMessage = "This feature is currently unavailable. The modification service needs to be configured.";
-        } else if (error.response?.data?.message) {
-          errorMessage = `Error: ${error.response.data.message}`;
-        } else if (error.code === 'ERR_NETWORK') {
-          errorMessage = "Cannot connect to server. Please check your connection.";
-        }
-      }
-      
-      const assistantErrorMessage: Message = {
-        id: (Date.now() + 1).toString(),
-        content: errorMessage,
-        type: "assistant",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, assistantErrorMessage]);
-      await saveMessage(assistantErrorMessage.content, 'assistant');
-      
-      throw error;
-    }
-  }, [value, baseUrl, saveMessage, sessionId, projectId, refreshPreviewUrl]);
+  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary, handleNonStreamingSubmit]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -828,6 +1134,14 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, sessionId, projectId, hasSessionSupport]);
 
+  // Function to refresh project details
+  const refreshProject = useCallback(async () => {
+    if (!projectId) return;
+    
+    setError("");
+    await fetchReadyProject(projectId);
+  }, [projectId, fetchReadyProject]);
+
   return (
     <div className="w-full bg-gradient-to-br from-black via-neutral-950 to-black h-screen flex">
       {/* Chat Section - 25% width */}
@@ -848,6 +1162,15 @@ const ChatPage: React.FC = () => {
               >
                 <History className="w-4 h-4" />
               </button>
+              {projectId && (
+                <button
+                  onClick={refreshProject}
+                  className="p-1.5 text-slate-400 hover:text-white transition-colors"
+                  title="Refresh project"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+              )}
               {isServerHealthy === false && (
                 <button
                   onClick={retryConnection}
@@ -865,6 +1188,60 @@ const ChatPage: React.FC = () => {
             </div>
           </div>
         </div>
+
+        {/* Project Info Section - Enhanced with URL verification */}
+        {(currentProject || currentProjectInfo.isVerified) && (
+          <div className="bg-slate-800/30 border-b border-slate-700/50 p-3">
+            <div className="flex items-center gap-2 mb-2">
+              <Code className="w-4 h-4 text-green-400" />
+              <span className="text-xs font-medium text-green-400">PROJECT</span>
+              {currentProjectInfo.isVerified && (
+                <div className={`w-2 h-2 rounded-full ${
+                  currentProjectInfo.matchReason === 'url_match' ? 'bg-green-500' : 'bg-yellow-500'
+                }`} title={`URL match: ${currentProjectInfo.matchReason}`}></div>
+              )}
+            </div>
+            <div className="space-y-1">
+              <p className="text-sm text-white font-medium">
+                {currentProject?.name || currentProjectInfo.name || `Project ${currentProject?.id || currentProjectInfo.id}`}
+              </p>
+              {currentProject?.description && (
+                <p className="text-xs text-slate-300 line-clamp-2">
+                  {currentProject.description}
+                </p>
+              )}
+              {currentProjectInfo.matchReason && (
+                <p className="text-xs text-slate-400">
+                  Context: {currentProjectInfo.matchReason === 'url_match' ? 'URL verified' : 'No URL match'}
+                </p>
+              )}
+              <div className="flex items-center justify-between">
+                <span className={`text-xs px-2 py-1 rounded-full ${
+                  currentProject?.status === 'ready' 
+                    ? 'bg-green-500/20 text-green-400' 
+                    : currentProject?.status === 'building'
+                    ? 'bg-yellow-500/20 text-yellow-400'
+                    : currentProject?.status === 'error'
+                    ? 'bg-red-500/20 text-red-400'
+                    : 'bg-gray-500/20 text-gray-400'
+                }`}>
+                  {currentProject?.status || 'unknown'}
+                </span>
+                {(currentProject?.deploymentUrl || previewUrl) && (
+                  <a
+                    href={currentProject?.deploymentUrl || previewUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1 text-slate-400 hover:text-white transition-colors"
+                    title="Open in new tab"
+                  >
+                    <ExternalLink className="w-3 h-3" />
+                  </a>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Summary Section */}
         {currentSummary && (
@@ -934,19 +1311,30 @@ const ChatPage: React.FC = () => {
             </div>
           )}
 
-          {messages.length === 0 && projectStatus === "loading" ? (
+          {messages.length === 0 && (projectStatus === "loading" || projectStatus === "fetching") ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="p-4 bg-slate-800/30 rounded-full mb-4">
                 <Loader2 className="w-8 h-8 text-white animate-spin" />
               </div>
               <h3 className="text-lg font-medium text-white mb-2">
-                {existingProject ? "Loading Project" : "Generating Code"}
+                {projectStatus === "fetching" 
+                  ? "Fetching Project" 
+                  : existingProject 
+                    ? "Loading Project" 
+                    : "Generating Code"}
               </h3>
               <p className="text-slate-400 max-w-sm text-sm">
-                {existingProject
-                  ? "Loading your project preview..."
-                  : "We are generating code files please wait"}
+                {projectStatus === "fetching"
+                  ? "Fetching project details and deployment status..."
+                  : existingProject
+                    ? "Loading your project preview..."
+                    : "We are generating code files please wait"}
               </p>
+              {currentProject && (
+                <div className="mt-3 text-xs text-slate-500">
+                  Project ID: {currentProject.id} • Status: {currentProject.status}
+                </div>
+              )}
             </div>
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
@@ -957,8 +1345,15 @@ const ChatPage: React.FC = () => {
                 Ready to Chat
               </h3>
               <p className="text-slate-400 max-w-sm text-sm">
-                Start describing changes you'd like to make to your project
+                {currentProject && currentProject.status === 'ready' 
+                  ? "Your project is ready! Start describing changes you'd like to make."
+                  : "Start describing changes you'd like to make to your project"}
               </p>
+              {(currentProject || currentProjectInfo.id) && (
+                <div className="mt-3 text-xs text-slate-500">
+                  Project: {currentProject?.name || currentProjectInfo.name || currentProject?.id || currentProjectInfo.id}
+                </div>
+              )}
             </div>
           ) : (
             <>
@@ -1002,9 +1397,22 @@ const ChatPage: React.FC = () => {
               value={prompt}
               onChange={handlePromptChange}
               onKeyPress={handleKeyPress}
-              placeholder={isServerHealthy === false ? "Server offline..." : "Describe changes..."}
+              placeholder={
+                isServerHealthy === false 
+                  ? "Server offline..." 
+                  : currentProject?.status !== 'ready'
+                    ? "Project not ready..."
+                    : "Describe changes..."
+              }
               rows={2}
-              disabled={isLoading || projectStatus === "loading" || isStreamingResponse || isServerHealthy === false}
+              disabled={
+                isLoading || 
+                projectStatus === "loading" || 
+                projectStatus === "fetching" ||
+                isStreamingResponse || 
+                isServerHealthy === false ||
+                (currentProject && currentProject.status !== 'ready')
+              }
               maxLength={1000}
             />
             <button
@@ -1013,8 +1421,10 @@ const ChatPage: React.FC = () => {
                 !prompt.trim() || 
                 isLoading || 
                 projectStatus === "loading" || 
+                projectStatus === "fetching" ||
                 isStreamingResponse || 
-                isServerHealthy === false
+                isServerHealthy === false ||
+                (currentProject && currentProject.status !== 'ready')
               }
               className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg transition-colors duration-200"
             >
@@ -1029,7 +1439,9 @@ const ChatPage: React.FC = () => {
             <span>
               {isServerHealthy === false 
                 ? "Server offline - check connection" 
-                : "Enter to send, Shift+Enter for new line"
+                : currentProject?.status !== 'ready'
+                  ? "Project not ready for modifications"
+                  : "Enter to send, Shift+Enter for new line"
               }
             </span>
             <span>{prompt.length}/1000</span>
@@ -1049,10 +1461,21 @@ const ChatPage: React.FC = () => {
                   Session: {sessionId.slice(0, 8)}...
                 </span>
               )}
-              {projectId && (
+              {(projectId || currentProjectInfo.id) && (
                 <span className="text-xs text-slate-400">
-                  Project: {projectId}
+                  Project: {projectId || currentProjectInfo.id}
                 </span>
+              )}
+              {previewUrl && (
+                <a
+                  href={previewUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-400 hover:text-blue-300 transition-colors flex items-center gap-1"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Open in new tab
+                </a>
               )}
               <div className="flex items-center gap-2">
                 <div
@@ -1061,7 +1484,7 @@ const ChatPage: React.FC = () => {
                       ? "bg-red-500"
                       : projectStatus === "ready"
                       ? "bg-green-500"
-                      : projectStatus === "loading"
+                      : projectStatus === "loading" || projectStatus === "fetching"
                       ? "bg-yellow-500"
                       : projectStatus === "error"
                       ? "bg-red-500"
@@ -1085,7 +1508,6 @@ const ChatPage: React.FC = () => {
                 className="w-full h-full"
                 title="Live Preview"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                key={previewUrl} // Force re-render when URL changes
                 onError={(e) => {
                   console.error("Iframe load error:", e);
                   setError("Failed to load preview. The deployment might not be ready yet.");
@@ -1097,7 +1519,7 @@ const ChatPage: React.FC = () => {
                   <div className="w-16 h-16 bg-slate-200 rounded-lg mx-auto mb-4 flex items-center justify-center">
                     {isServerHealthy === false ? (
                       <AlertCircle className="w-8 h-8 text-red-400" />
-                    ) : isGenerating.current || projectStatus === "loading" ? (
+                    ) : isGenerating.current || projectStatus === "loading" || projectStatus === "fetching" ? (
                       <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
                     ) : (
                       <Code className="w-8 h-8 text-slate-400" />
@@ -1106,15 +1528,33 @@ const ChatPage: React.FC = () => {
                   <p className="text-slate-600 mb-4">
                     {isServerHealthy === false
                       ? "Server is offline - cannot load preview"
+                      : projectStatus === "fetching"
+                      ? "Fetching project details..."
                       : isGenerating.current
                       ? existingProject
                         ? "Loading preview..."
                         : "Generating preview..."
                       : projectStatus === "error"
                       ? "Failed to load preview"
+                      : currentProject?.status === 'building'
+                      ? "Project is building - please wait..."
+                      : currentProject?.status === 'pending'
+                      ? "Project build is pending..."
                       : "Preview will appear here"}
                   </p>
-                  {isServerHealthy === false && (
+                  {currentProject && currentProject.status && currentProject.status !== 'ready' && (
+                    <div className="text-xs text-slate-500 mb-4">
+                      Project Status: {currentProject.status}
+                      {currentProject.status === 'building' && (
+                        <div className="mt-2">
+                          <div className="w-full bg-gray-200 rounded-full h-2">
+                            <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{width: '60%'}}></div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {(isServerHealthy === false || projectStatus === "error") && (
                     <button
                       onClick={retryConnection}
                       disabled={isRetrying}
@@ -1128,6 +1568,15 @@ const ChatPage: React.FC = () => {
                       ) : (
                         "Retry Connection"
                       )}
+                    </button>
+                  )}
+                  {currentProject && currentProject.status !== 'ready' && currentProject.status !== 'error' && isServerHealthy !== false && (
+                    <button
+                      onClick={refreshProject}
+                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm"
+                    >
+                      <RefreshCw className="w-4 h-4 inline mr-2" />
+                      Refresh Status
                     </button>
                   )}
                 </div>
