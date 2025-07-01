@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
-import { Send, Code, Loader2, MessageSquare, History } from "lucide-react";
+import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle } from "lucide-react";
 import { useLocation } from "react-router-dom";
 
 interface LocationState {
@@ -67,6 +67,8 @@ const ChatPage: React.FC = () => {
   const [conversationStats, setConversationStats] = useState<ConversationStats | null>(null);
   const [isStreamingResponse, setIsStreamingResponse] = useState(false);
   const [hasSessionSupport, setHasSessionSupport] = useState(true);
+  const [isServerHealthy, setIsServerHealthy] = useState<boolean | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
   // Refs to prevent duplicate API calls
   const hasInitialized = useRef(false);
@@ -93,6 +95,63 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  // Server health check
+  const checkServerHealth = useCallback(async () => {
+    try {
+      const healthResponse = await axios.get(`${baseUrl}/health`, { 
+        timeout: 5000 
+      });
+      console.log("✅ Server is running:", healthResponse.data);
+      setIsServerHealthy(true);
+      setError("");
+      return true;
+    } catch (error) {
+      console.error("❌ Server health check failed:", error);
+      setIsServerHealthy(false);
+      
+      if (axios.isAxiosError(error)) {
+        if (error.code === 'ECONNREFUSED' || error.code === 'ERR_NETWORK') {
+          setError("Backend server is not responding. Please ensure it's running on the correct port.");
+        } else {
+          setError(`Server error: ${error.response?.status || 'Unknown'}`);
+        }
+      } else {
+        setError("Cannot connect to server");
+      }
+      return false;
+    }
+  }, [baseUrl]);
+
+  // Retry connection with loading state
+  const retryConnection = useCallback(async () => {
+    setIsRetrying(true);
+    setError("");
+    setProjectStatus("loading");
+    
+    try {
+      const isHealthy = await checkServerHealth();
+      if (isHealthy) {
+        // Reset initialization and retry
+        hasInitialized.current = false;
+        await initializeSession();
+        
+        if (existingProject && projectId) {
+          await fetchProjectDeploymentUrl(projectId);
+        } else if (navPrompt && projectId) {
+          setPrompt(navPrompt);
+          await generateCode(navPrompt, projectId);
+        } else {
+          setProjectStatus("idle");
+        }
+      }
+    } catch (error) {
+      setError("Still cannot connect to server. Please check your backend setup.");
+      setProjectStatus("error");
+    } finally {
+      setIsRetrying(false);
+    }
+  }, [checkServerHealth]);
 
   // Initialize or get session
   const initializeSession = useCallback(async () => {
@@ -164,23 +223,46 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl]);
 
-  // Load project messages (fallback)
+  // Load project messages (enhanced with better error handling)
   const loadProjectMessages = useCallback(async (projectId: number) => {
     try {
       const response = await axios.get(`${baseUrl}/api/messages/project/${projectId}`);
-      const history = response.data || [];
       
-      const formattedMessages: Message[] = history.map((msg: any) => ({
-        id: msg.id || Date.now().toString(),
-        content: msg.content,
-        type: msg.role === "user" ? "user" : "assistant",
-        timestamp: new Date(msg.createdAt || msg.timestamp),
-      }));
+      // Handle the new response structure
+      if (response.data.success && response.data.data) {
+        const history = response.data.data;
+        
+        const formattedMessages: Message[] = history.map((msg: any) => ({
+          id: msg.id || Date.now().toString(),
+          content: msg.content,
+          type: msg.role === "user" ? "user" : "assistant",
+          timestamp: new Date(msg.createdAt || msg.timestamp),
+        }));
 
-      setMessages(formattedMessages);
-      messageCountRef.current = formattedMessages.length;
+        setMessages(formattedMessages);
+        messageCountRef.current = formattedMessages.length;
+        console.log(`✅ Loaded ${formattedMessages.length} messages for project ${projectId}`);
+      } else {
+        console.warn("No messages found for project:", projectId);
+        setMessages([]);
+      }
     } catch (error) {
       console.error("Error loading project messages:", error);
+      
+      // Enhanced error handling
+      if (axios.isAxiosError(error)) {
+        if (error.response?.status === 404) {
+          console.warn(`Project ${projectId} messages not found, starting fresh`);
+          setMessages([]);
+        } else if (error.code === 'ERR_NETWORK') {
+          setError("Cannot connect to server. Please check if the backend is running.");
+        } else {
+          console.warn(`Failed to load project messages: ${error.response?.data?.error || error.message}`);
+          setMessages([]); // Don't show error for this, just start fresh
+        }
+      } else {
+        setMessages([]);
+      }
     }
   }, [baseUrl]);
 
@@ -252,7 +334,11 @@ const ChatPage: React.FC = () => {
         }
       } catch (error) {
         console.error("Error fetching project:", error);
-        setError("Failed to load project");
+        if (axios.isAxiosError(error) && error.code === 'ERR_NETWORK') {
+          setError("Cannot connect to server");
+        } else {
+          setError("Failed to load project");
+        }
         setProjectStatus("error");
       }
     },
@@ -290,7 +376,11 @@ const ChatPage: React.FC = () => {
         }
       } catch (error) {
         console.error("Error generating code:", error);
-        setError("Failed to generate code. Please try again.");
+        if (axios.isAxiosError(error) && error.code === 'ERR_NETWORK') {
+          setError("Cannot connect to server. Please check if the backend is running.");
+        } else {
+          setError("Failed to generate code. Please try again.");
+        }
         setProjectStatus("error");
       } finally {
         isGenerating.current = false;
@@ -299,11 +389,18 @@ const ChatPage: React.FC = () => {
     [baseUrl]
   );
 
-  // Initialize component only once
+  // Initialize component with health check
   useEffect(() => {
     if (hasInitialized.current) return;
 
-    const initializeProject = async () => {
+    const initializeWithHealthCheck = async () => {
+      // Check server health first
+      const serverHealthy = await checkServerHealth();
+      if (!serverHealthy) {
+        setProjectStatus("error");
+        return;
+      }
+
       const currentSessionId = await initializeSession();
       
       if (existingProject && projectId) {
@@ -317,8 +414,8 @@ const ChatPage: React.FC = () => {
       hasInitialized.current = true;
     };
 
-    initializeProject();
-  }, [initializeSession, fetchProjectDeploymentUrl, generateCode, existingProject, projectId, navPrompt]);
+    initializeWithHealthCheck();
+  }, [checkServerHealth, initializeSession, fetchProjectDeploymentUrl, generateCode, existingProject, projectId, navPrompt]);
 
   // Handle streaming response
   const handleStreamingResponse = useCallback(async (
@@ -423,7 +520,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, value, projectId]);
 
-  // Save message to backend
+  // Save message to backend (enhanced)
   const saveMessage = useCallback(async (content: string, role: 'user' | 'assistant') => {
     if (!projectId) return;
 
@@ -438,16 +535,26 @@ const ChatPage: React.FC = () => {
           },
         });
       } else {
-        // Use project-based messaging
+        // Use project-based messaging with the new API structure
         await axios.post(`${baseUrl}/api/messages`, {
           projectId,
           role,
           content,
-          metadata: { sessionId },
+          sessionId,
+          metadata: {
+            projectId,
+            sessionId,
+            timestamp: new Date().toISOString()
+          }
         });
       }
     } catch (error) {
       console.warn("Could not save message:", error);
+      
+      // Don't throw error, just log it since message saving is not critical for UI
+      if (axios.isAxiosError(error)) {
+        console.warn(`Save message failed: ${error.response?.data?.error || error.message}`);
+      }
     }
   }, [baseUrl, projectId, sessionId, hasSessionSupport]);
 
@@ -501,7 +608,7 @@ const ChatPage: React.FC = () => {
     }
   }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary]);
 
-  // FIXED: Non-streaming submit handler that avoids the problematic legacy endpoint
+  // Non-streaming submit handler (enhanced)
   const handleNonStreamingSubmit = useCallback(async (currentPrompt: string) => {
     try {
       // Use the new API endpoint instead of legacy /modify
@@ -546,6 +653,8 @@ const ChatPage: React.FC = () => {
           errorMessage = "This feature is currently unavailable. The modification service needs to be configured.";
         } else if (error.response?.data?.message) {
           errorMessage = `Error: ${error.response.data.message}`;
+        } else if (error.code === 'ERR_NETWORK') {
+          errorMessage = "Cannot connect to server. Please check your connection.";
         }
       }
       
@@ -580,7 +689,7 @@ const ChatPage: React.FC = () => {
     []
   );
 
-  // Clear conversation
+  // Clear conversation (enhanced)
   const clearConversation = useCallback(async () => {
     if (!sessionId) return;
     
@@ -621,6 +730,20 @@ const ChatPage: React.FC = () => {
               >
                 <History className="w-4 h-4" />
               </button>
+              {isServerHealthy === false && (
+                <button
+                  onClick={retryConnection}
+                  disabled={isRetrying}
+                  className="p-1.5 text-red-400 hover:text-red-300 transition-colors"
+                  title="Retry connection"
+                >
+                  {isRetrying ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4" />
+                  )}
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -656,11 +779,40 @@ const ChatPage: React.FC = () => {
           </div>
         )}
 
+        {/* Server Status */}
+        {isServerHealthy === false && (
+          <div className="bg-red-500/10 border-b border-red-500/20 p-3">
+            <div className="flex items-center gap-2 mb-1">
+              <AlertCircle className="w-4 h-4 text-red-400" />
+              <span className="text-xs font-medium text-red-400">SERVER OFFLINE</span>
+            </div>
+            <p className="text-xs text-red-300">
+              Cannot connect to backend server
+            </p>
+          </div>
+        )}
+
         {/* Messages Area */}
         <div className="flex-1 overflow-y-auto p-4 space-y-4">
           {error && (
             <div className="bg-red-500/10 border border-red-500/20 rounded-lg p-3">
               <p className="text-red-400 text-sm">{error}</p>
+              {error.includes("Cannot connect") && (
+                <button
+                  onClick={retryConnection}
+                  disabled={isRetrying}
+                  className="mt-2 px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 text-xs rounded transition-colors disabled:opacity-50"
+                >
+                  {isRetrying ? (
+                    <>
+                      <Loader2 className="w-3 h-3 animate-spin inline mr-1" />
+                      Retrying...
+                    </>
+                  ) : (
+                    "Retry Connection"
+                  )}
+                </button>
+              )}
             </div>
           )}
 
@@ -732,15 +884,19 @@ const ChatPage: React.FC = () => {
               value={prompt}
               onChange={handlePromptChange}
               onKeyPress={handleKeyPress}
-              placeholder="Describe changes..."
+              placeholder={isServerHealthy === false ? "Server offline..." : "Describe changes..."}
               rows={2}
-              disabled={isLoading || projectStatus === "loading" || isStreamingResponse}
+              disabled={isLoading || projectStatus === "loading" || isStreamingResponse || isServerHealthy === false}
               maxLength={1000}
             />
             <button
               onClick={handleSubmit}
               disabled={
-                !prompt.trim() || isLoading || projectStatus === "loading" || isStreamingResponse
+                !prompt.trim() || 
+                isLoading || 
+                projectStatus === "loading" || 
+                isStreamingResponse || 
+                isServerHealthy === false
               }
               className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg transition-colors duration-200"
             >
@@ -752,7 +908,12 @@ const ChatPage: React.FC = () => {
             </button>
           </div>
           <div className="flex items-center justify-between mt-2 text-xs text-slate-400">
-            <span>Enter to send, Shift+Enter for new line</span>
+            <span>
+              {isServerHealthy === false 
+                ? "Server offline - check connection" 
+                : "Enter to send, Shift+Enter for new line"
+              }
+            </span>
             <span>{prompt.length}/1000</span>
           </div>
         </div>
@@ -770,10 +931,17 @@ const ChatPage: React.FC = () => {
                   Session: {sessionId.slice(0, 8)}...
                 </span>
               )}
+              {projectId && (
+                <span className="text-xs text-slate-400">
+                  Project: {projectId}
+                </span>
+              )}
               <div className="flex items-center gap-2">
                 <div
                   className={`w-3 h-3 rounded-full ${
-                    projectStatus === "ready"
+                    isServerHealthy === false
+                      ? "bg-red-500"
+                      : projectStatus === "ready"
                       ? "bg-green-500"
                       : projectStatus === "loading"
                       ? "bg-yellow-500"
@@ -783,7 +951,7 @@ const ChatPage: React.FC = () => {
                   }`}
                 ></div>
                 <span className="text-xs text-slate-400 capitalize">
-                  {projectStatus}
+                  {isServerHealthy === false ? "offline" : projectStatus}
                 </span>
               </div>
             </div>
@@ -793,25 +961,33 @@ const ChatPage: React.FC = () => {
         {/* Preview Content */}
         <div className="flex-1 p-4">
           <div className="w-full h-full bg-white rounded-lg shadow-2xl overflow-hidden">
-            {previewUrl ? (
+            {previewUrl && isServerHealthy !== false ? (
               <iframe
                 src={previewUrl}
                 className="w-full h-full"
                 title="Live Preview"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                onError={(e) => {
+                  console.error("Iframe load error:", e);
+                  setError("Failed to load preview. The deployment might not be ready yet.");
+                }}
               />
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-gray-50">
-                <div className="text-center">
+                <div className="text-center max-w-md">
                   <div className="w-16 h-16 bg-slate-200 rounded-lg mx-auto mb-4 flex items-center justify-center">
-                    {isGenerating.current ? (
+                    {isServerHealthy === false ? (
+                      <AlertCircle className="w-8 h-8 text-red-400" />
+                    ) : isGenerating.current || projectStatus === "loading" ? (
                       <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
                     ) : (
                       <Code className="w-8 h-8 text-slate-400" />
                     )}
                   </div>
-                  <p className="text-slate-600">
-                    {isGenerating.current
+                  <p className="text-slate-600 mb-4">
+                    {isServerHealthy === false
+                      ? "Server is offline - cannot load preview"
+                      : isGenerating.current
                       ? existingProject
                         ? "Loading preview..."
                         : "Generating preview..."
@@ -819,6 +995,22 @@ const ChatPage: React.FC = () => {
                       ? "Failed to load preview"
                       : "Preview will appear here"}
                   </p>
+                  {isServerHealthy === false && (
+                    <button
+                      onClick={retryConnection}
+                      disabled={isRetrying}
+                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white rounded-lg transition-colors text-sm"
+                    >
+                      {isRetrying ? (
+                        <>
+                          <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
+                          Reconnecting...
+                        </>
+                      ) : (
+                        "Retry Connection"
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
             )}
