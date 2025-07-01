@@ -76,9 +76,9 @@ const ChatPage: React.FC = () => {
   const currentProjectId = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messageCountRef = useRef(0);
-  const sessionInitialized = useRef(false); // NEW: Track session initialization
-  const projectLoaded = useRef(false); // NEW: Track project loading
-  const healthCheckDone = useRef(false); // NEW: Track health check
+  const sessionInitialized = useRef(false);
+  const projectLoaded = useRef(false);
+  const healthCheckDone = useRef(false);
 
   const location = useLocation();
   const {
@@ -438,13 +438,40 @@ const ChatPage: React.FC = () => {
     [baseUrl]
   );
 
-  // MAIN INITIALIZATION - ENHANCED to prevent duplicate calls
+  // FIX 1: Check if we should run initialization only for new prompts or project changes
+  const shouldInitialize = useCallback(() => {
+    // Only initialize if:
+    // 1. Not already initialized AND
+    // 2. We have a navigation prompt (new generation request) OR existingProject is true
+    return !hasInitialized.current && (navPrompt || existingProject);
+  }, [navPrompt, existingProject]);
+
+  // MAIN INITIALIZATION - ENHANCED to prevent regeneration on refresh
   useEffect(() => {
-    if (hasInitialized.current) {
-      console.log("🔄 Component already initialized, skipping...");
+    if (!shouldInitialize()) {
+      console.log("🔄 Skipping initialization - no new generation or existing project load needed");
+      
+      // If we have projectId but no navPrompt and not existingProject, just load the existing preview
+      if (projectId && !navPrompt && !existingProject && !hasInitialized.current) {
+        console.log("🔍 Loading existing project preview only...");
+        hasInitialized.current = true;
+        
+        const loadExistingPreview = async () => {
+          const serverHealthy = await checkServerHealth();
+          if (serverHealthy) {
+            await initializeSession();
+            await fetchProjectDeploymentUrl(projectId);
+          }
+        };
+        
+        loadExistingPreview();
+      }
+      
       return;
     }
-   hasInitialized.current = true;
+
+    hasInitialized.current = true;
+    
     const initializeWithHealthCheck = async () => {
       console.log("🚀 Starting ChatPage initialization...");
       
@@ -471,12 +498,37 @@ const ChatPage: React.FC = () => {
         setProjectStatus("idle");
       }
       
-      
       console.log("✅ ChatPage initialization complete");
     };
 
     initializeWithHealthCheck();
-  }, []); // IMPORTANT: Empty dependency array to run only once
+  }, [shouldInitialize, checkServerHealth, initializeSession, fetchProjectDeploymentUrl, generateCode, existingProject, projectId, navPrompt]);
+
+  // FIX 2: Refresh preview URL after modifications
+  const refreshPreviewUrl = useCallback(async () => {
+    if (!projectId) return;
+    
+    try {
+      console.log("🔄 Refreshing preview URL...");
+      const res = await axios.get<Project>(`${baseUrl}/api/projects/${projectId}`);
+      const project = res.data;
+      
+      if (project.deploymentUrl && project.deploymentUrl !== previewUrl) {
+        console.log("🔄 Preview URL updated:", project.deploymentUrl);
+        setPreviewUrl(project.deploymentUrl);
+        
+        // Add a small delay to ensure the new deployment is ready
+        setTimeout(() => {
+          const iframe = document.querySelector('iframe');
+          if (iframe) {
+            iframe.src = iframe.src; // Force refresh iframe
+          }
+        }, 1000);
+      }
+    } catch (error) {
+      console.warn("Could not refresh preview URL:", error);
+    }
+  }, [baseUrl, projectId, previewUrl]);
 
   // Handle streaming response
   const handleStreamingResponse = useCallback(async (
@@ -560,6 +612,9 @@ const ChatPage: React.FC = () => {
         )
       );
 
+      // FIX 2: Refresh preview after streaming completes
+      await refreshPreviewUrl();
+
     } catch (error) {
       console.error("Error in streaming response:", error);
       
@@ -578,7 +633,7 @@ const ChatPage: React.FC = () => {
     } finally {
       setIsStreamingResponse(false);
     }
-  }, [baseUrl, value, projectId]);
+  }, [baseUrl, value, projectId, refreshPreviewUrl]);
 
   // Save message to backend (enhanced)
   const saveMessage = useCallback(async (content: string, role: 'user' | 'assistant') => {
@@ -702,6 +757,9 @@ const ChatPage: React.FC = () => {
       setMessages((prev) => [...prev, assistantMessage]);
       await saveMessage(assistantMessage.content, 'assistant');
       
+      // FIX 2: Refresh preview after non-streaming modification
+      await refreshPreviewUrl();
+      
     } catch (error) {
       console.error("Error in non-streaming modification:", error);
       
@@ -730,7 +788,7 @@ const ChatPage: React.FC = () => {
       
       throw error;
     }
-  }, [value, baseUrl, saveMessage, sessionId, projectId]);
+  }, [value, baseUrl, saveMessage, sessionId, projectId, refreshPreviewUrl]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -1027,6 +1085,7 @@ const ChatPage: React.FC = () => {
                 className="w-full h-full"
                 title="Live Preview"
                 sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+                key={previewUrl} // Force re-render when URL changes
                 onError={(e) => {
                   console.error("Iframe load error:", e);
                   setError("Failed to load preview. The deployment might not be ready yet.");
