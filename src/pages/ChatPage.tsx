@@ -8,7 +8,7 @@ import React, {
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
 import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink } from "lucide-react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 type ProjectInfo = {
   id: number | null;
@@ -66,6 +66,7 @@ interface ConversationStats {
 const ChatPage: React.FC = () => {
   const context = useContext(MyContext);
   const { value } = context as ContextValue;
+  const navigate = useNavigate();
   
   const [messages, setMessages] = useState<Message[]>([]);
   const [prompt, setPrompt] = useState<string>("");
@@ -167,84 +168,91 @@ const ChatPage: React.FC = () => {
     if (storedUserId && !isNaN(parseInt(storedUserId))) {
       return parseInt(storedUserId);
     }
-    
-    // Fallback user ID - replace with actual logic
+    return 1;
+  }, []);
+  const getprojectId = useCallback((): number => {
+    // TODO: Replace with your actual authentication system
+    const storedProjectId = localStorage.getItem('projectId');
+    if (storedProjectId && !isNaN(parseInt(storedProjectId))) {
+      return parseInt(storedProjectId);
+    }
     return 1;
   }, []);
 
   // NEW: Verify project by URL
-  const verifyProjectByUrl = useCallback(async (): Promise<{
-    hasMatch: boolean;
-    project: any | null;
-    matchReason: string;
-  }> => {
-    const deployedUrl = getDeployedAppUrl();
-    
-    if (!deployedUrl) {
+ const verifyProjectByUrl = useCallback(async (): Promise<{
+  hasMatch: boolean;
+  project: any | null;
+  matchReason: string;
+}> => {
+  const deployedUrl = getDeployedAppUrl();
+  const projectId = getprojectId();
+
+  if (!deployedUrl || !projectId) {
+    return {
+      hasMatch: false,
+      project: null,
+      matchReason: 'no_deployed_url'
+    };
+  }
+
+  try {
+    console.log(`🔍 Verifying project for URL: ${deployedUrl}`);
+    const userId = getCurrentUserId();
+
+    const response = await axios.get(
+      `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}&projectId=${projectId}`,
+      { timeout: 5000 }
+    );
+
+    const result = response.data;
+
+    if (result.success && result.data.hasMatch) {
+      console.log('✅ Project verified for current URL:', result.data.project.name);
+      setCurrentProjectInfo({
+        id: result.data.project.id,
+        name: result.data.project.name,
+        matchReason: 'url_match',
+        isVerified: true
+      });
+
       return {
-        hasMatch: false,
-        project: null,
-        matchReason: 'no_deployed_url'
+        hasMatch: true,
+        project: result.data.project,
+        matchReason: 'url_match'
       };
-    }
-    
-    try {
-      console.log(`🔍 Verifying project for URL: ${deployedUrl}`);
-      
-      const userId = getCurrentUserId();
-      
-      const response = await axios.get(
-        `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}`,
-        { timeout: 5000 }
-      );
-      
-      const result = response.data;
-      
-      if (result.success && result.data.hasMatch) {
-        console.log('✅ Project verified for current URL:', result.data.project.name);
-        setCurrentProjectInfo({
-          id: result.data.project.id,
-          name: result.data.project.name,
-          matchReason: 'url_match',
-          isVerified: true
-        });
-        
-        return {
-          hasMatch: true,
-          project: result.data.project,
-          matchReason: 'url_match'
-        };
-      } else {
-        console.log('⚠️ No project found for current URL');
-        setCurrentProjectInfo({
-          id: null,
-          name: null,
-          matchReason: 'no_url_match',
-          isVerified: true
-        });
-        
-        return {
-          hasMatch: false,
-          project: null,
-          matchReason: 'no_url_match'
-        };
-      }
-    } catch (error) {
-      console.error('Failed to verify project by URL:', error);
+    } else {
+      console.log('⚠️ No project found for current URL');
       setCurrentProjectInfo({
         id: null,
         name: null,
-        matchReason: 'verification_error',
-        isVerified: false
+        matchReason: 'no_url_match',
+        isVerified: true
       });
-      
+
       return {
         hasMatch: false,
         project: null,
-        matchReason: 'verification_error'
+        matchReason: 'no_url_match'
       };
     }
-  }, [baseUrl, getDeployedAppUrl, getCurrentUserId]);
+  } catch (error) {
+    console.error('❌ Failed to verify project by URL:', error);
+    setCurrentProjectInfo({
+      id: null,
+      name: null,
+      matchReason: 'verification_error',
+      isVerified: false
+    });
+
+    return {
+      hasMatch: false,
+      project: null,
+      matchReason: 'verification_error'
+    };
+  }
+}, [baseUrl, getDeployedAppUrl, getCurrentUserId]);
+
 
   // Server health check
   const checkServerHealth = useCallback(async () => {
@@ -315,6 +323,12 @@ const ChatPage: React.FC = () => {
           setProjectStatus("loading");
           await pollProjectStatus(projId);
         } else if (project.status === "error") {
+          // NEW: Check if there's no deployed URL - means build failed on first go
+          if (!project.deploymentUrl) {
+            console.log("❌ Build failed on first attempt - no deployed URL found, redirecting to index");
+            navigate("/");
+            return;
+          }
           setError("Project build failed. Please try regenerating the project.");
           setProjectStatus("error");
         } else {
@@ -347,7 +361,7 @@ const ChatPage: React.FC = () => {
         setProjectStatus("error");
       }
     },
-    [baseUrl, projectStatus, navPrompt]
+    [baseUrl, projectStatus, navPrompt, navigate]
   );
 
   // Poll project status until it's ready
@@ -371,6 +385,12 @@ const ChatPage: React.FC = () => {
             setProjectStatus("ready");
             return;
           } else if (project.status === "error") {
+            // NEW: Check if there's no deployed URL during polling - means build failed
+            if (!project.deploymentUrl) {
+              console.log("❌ Build failed during polling - no deployed URL found, redirecting to index");
+              navigate("/");
+              return;
+            }
             setError("Project build failed during polling.");
             setProjectStatus("error");
             return;
@@ -395,7 +415,7 @@ const ChatPage: React.FC = () => {
       
       poll();
     },
-    [baseUrl]
+    [baseUrl, navigate]
   );
 
   // Initialize or get session
@@ -625,11 +645,27 @@ const ChatPage: React.FC = () => {
           setError("Failed to generate code. Please try again.");
         }
         setProjectStatus("error");
+        
+        // NEW: If code generation fails and there's no existing deployed URL, redirect to index
+        if (projId) {
+          try {
+            const res = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
+            if (!res.data.deploymentUrl) {
+              console.log("❌ Code generation failed and no deployed URL exists, redirecting to index");
+              navigate("/");
+              return;
+            }
+          } catch (fetchError) {
+            console.log("❌ Could not fetch project after generation failure, redirecting to index");
+            navigate("/");
+            return;
+          }
+        }
       } finally {
         isGenerating.current = false;
       }
     },
-    [baseUrl]
+    [baseUrl, navigate]
   );
 
   // Check if we should run initialization
