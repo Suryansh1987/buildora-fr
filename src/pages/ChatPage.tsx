@@ -170,13 +170,13 @@ const ChatPage: React.FC = () => {
     }
     return 1;
   }, []);
-  const getprojectId = useCallback((): number => {
+  const getprojectId = useCallback((): number|null => {
     // TODO: Replace with your actual authentication system
     const storedProjectId = localStorage.getItem('projectId');
     if (storedProjectId && !isNaN(parseInt(storedProjectId))) {
       return parseInt(storedProjectId);
     }
-    return 1;
+    return null;
   }, []);
 
   // NEW: Verify project by URL
