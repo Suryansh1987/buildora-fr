@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
-import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink } from "lucide-react";
+import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink, Zap, FileText, Palette, Globe, CheckCircle } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 type ProjectInfo = {
@@ -37,7 +37,7 @@ interface Project {
 interface Message {
   id: string;
   content: string;
-  type: "user" | "assistant";
+  type: "user" | "assistant" | "system";
   timestamp: Date;
   isStreaming?: boolean;
 }
@@ -63,6 +63,15 @@ interface ConversationStats {
   averageMessageLength: number;
 }
 
+interface BuildStep {
+  id: number;
+  title: string;
+  description: string;
+  icon: React.ComponentType<any>;
+  completed: boolean;
+  inProgress: boolean;
+}
+
 const ChatPage: React.FC = () => {
   const context = useContext(MyContext);
   const { value } = context as ContextValue;
@@ -85,6 +94,17 @@ const ChatPage: React.FC = () => {
   const [isRetrying, setIsRetrying] = useState(false);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   
+  // NEW: Build progress states
+  const [buildSteps, setBuildSteps] = useState<BuildStep[]>([
+    { id: 1, title: "Analyzing Requirements", description: "Understanding your prompt and requirements", icon: FileText, completed: false, inProgress: false },
+    { id: 2, title: "Generating Code", description: "Creating React components and logic", icon: Code, completed: false, inProgress: false },
+    { id: 3, title: "Styling Interface", description: "Applying beautiful designs and layouts", icon: Palette, completed: false, inProgress: false },
+    { id: 4, title: "Optimizing Performance", description: "Enhancing speed and responsiveness", icon: Zap, completed: false, inProgress: false },
+    { id: 5, title: "Deploying Project", description: "Making your app live and accessible", icon: Globe, completed: false, inProgress: false }
+  ]);
+  const [currentBuildStep, setCurrentBuildStep] = useState(0);
+  const [showBuildProgress, setShowBuildProgress] = useState(false);
+  
   // NEW: Project matching state
   const [currentProjectInfo, setCurrentProjectInfo] = useState<ProjectInfo>({
     id: null,
@@ -102,6 +122,7 @@ const ChatPage: React.FC = () => {
   const sessionInitialized = useRef(false);
   const projectLoaded = useRef(false);
   const healthCheckDone = useRef(false);
+  const buildProgressInterval = useRef<NodeJS.Timeout | null>(null);
 
   const location = useLocation();
   const {
@@ -121,6 +142,89 @@ const ChatPage: React.FC = () => {
   useEffect(() => {
     scrollToBottom();
   }, [messages, scrollToBottom]);
+
+  // NEW: Build progress simulation
+  const startBuildProgress = useCallback(() => {
+    setShowBuildProgress(true);
+    setCurrentBuildStep(0);
+    
+    // Reset all steps
+    setBuildSteps(prev => prev.map(step => ({ ...step, completed: false, inProgress: false })));
+    
+    // Add initial system message
+    const buildStartMessage: Message = {
+      id: `build-start-${Date.now()}`,
+      content: "🐕 CodePup is starting to build your project! Woof woof! Let me work my magic...",
+      type: "system",
+      timestamp: new Date(),
+    };
+    setMessages(prev => [...prev, buildStartMessage]);
+
+    let stepIndex = 0;
+    
+    buildProgressInterval.current = setInterval(() => {
+      if (stepIndex < buildSteps.length) {
+        // Mark current step as in progress
+        setBuildSteps(prev => prev.map((step, index) => ({
+          ...step,
+          inProgress: index === stepIndex,
+          completed: index < stepIndex
+        })));
+        
+        setCurrentBuildStep(stepIndex);
+        
+        // Add step message
+        const stepMessage: Message = {
+          id: `build-step-${stepIndex}-${Date.now()}`,
+          content: `🔨 ${buildSteps[stepIndex].title}: ${buildSteps[stepIndex].description}`,
+          type: "system",
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, stepMessage]);
+        
+        stepIndex++;
+      } else {
+        // Complete all steps
+        setBuildSteps(prev => prev.map(step => ({ ...step, completed: true, inProgress: false })));
+        
+        const completionMessage: Message = {
+          id: `build-complete-${Date.now()}`,
+          content: "✨ Build complete! Your project is ready to preview. CodePup did a great job! 🎉",
+          type: "system",
+          timestamp: new Date(),
+        };
+        setMessages(prev => [...prev, completionMessage]);
+        
+        if (buildProgressInterval.current) {
+          clearInterval(buildProgressInterval.current);
+          buildProgressInterval.current = null;
+        }
+        
+        // Hide progress after a short delay
+        setTimeout(() => {
+          setShowBuildProgress(false);
+        }, 30000);
+      }
+    }, 30000); // 2 seconds per step
+  }, [buildSteps]);
+
+  const stopBuildProgress = useCallback(() => {
+    if (buildProgressInterval.current) {
+      clearInterval(buildProgressInterval.current);
+      buildProgressInterval.current = null;
+    }
+    setShowBuildProgress(false);
+    setBuildSteps(prev => prev.map(step => ({ ...step, completed: true, inProgress: false })));
+  }, []);
+
+  // Clean up interval on unmount
+  useEffect(() => {
+    return () => {
+      if (buildProgressInterval.current) {
+        clearInterval(buildProgressInterval.current);
+      }
+    };
+  }, []);
 
   // NEW: Get deployed app URL from current context
   const getDeployedAppUrl = useCallback((): string | undefined => {
@@ -170,6 +274,7 @@ const ChatPage: React.FC = () => {
     }
     return 1;
   }, []);
+  
   const getprojectId = useCallback((): number|null => {
     // TODO: Replace with your actual authentication system
     const storedProjectId = localStorage.getItem('projectId');
@@ -253,7 +358,6 @@ const ChatPage: React.FC = () => {
   }
 }, [baseUrl, getDeployedAppUrl, getCurrentUserId]);
 
-
   // Server health check
   const checkServerHealth = useCallback(async () => {
     if (healthCheckDone.current) {
@@ -313,24 +417,29 @@ const ChatPage: React.FC = () => {
           console.log("✅ Project is ready with deployment URL:", project.deploymentUrl);
           setPreviewUrl(project.deploymentUrl);
           setProjectStatus("ready");
+          stopBuildProgress();
         } else if (project.status === "building") {
           console.log("🔨 Project is still building, will poll for updates");
           setProjectStatus("loading");
+          startBuildProgress();
           // Start polling for project readiness
           await pollProjectStatus(projId);
         } else if (project.status === "pending") {
           console.log("⏳ Project is pending, waiting for build to start");
           setProjectStatus("loading");
+          startBuildProgress();
           await pollProjectStatus(projId);
         } else if (project.status === "error") {
           // NEW: Check if there's no deployed URL - means build failed on first go
           if (!project.deploymentUrl) {
             console.log("❌ Build failed on first attempt - no deployed URL found, redirecting to index");
+            stopBuildProgress();
             navigate("/");
             return;
           }
           setError("Project build failed. Please try regenerating the project.");
           setProjectStatus("error");
+          stopBuildProgress();
         } else {
           // Project exists but no deployment URL yet
           console.log("📝 Project found but deployment not ready, starting build...");
@@ -338,14 +447,17 @@ const ChatPage: React.FC = () => {
           // Try to trigger a build if there's a prompt available
           if (navPrompt) {
             console.log("🚀 Triggering build with navigation prompt");
+            startBuildProgress();
             await generateCode(navPrompt, projId);
           } else {
             setError("Project found, but deployment is not ready and no prompt available to rebuild.");
             setProjectStatus("error");
+            stopBuildProgress();
           }
         }
       } catch (error) {
         console.error("❌ Error fetching project:", error);
+        stopBuildProgress();
         
         if (axios.isAxiosError(error)) {
           if (error.response?.status === 404) {
@@ -361,7 +473,7 @@ const ChatPage: React.FC = () => {
         setProjectStatus("error");
       }
     },
-    [baseUrl, projectStatus, navPrompt, navigate]
+    [baseUrl, projectStatus, navPrompt, navigate, startBuildProgress, stopBuildProgress]
   );
 
   // Poll project status until it's ready
@@ -383,20 +495,24 @@ const ChatPage: React.FC = () => {
             console.log("✅ Project is now ready!");
             setPreviewUrl(project.deploymentUrl);
             setProjectStatus("ready");
+            stopBuildProgress();
             return;
           } else if (project.status === "error") {
             // NEW: Check if there's no deployed URL during polling - means build failed
             if (!project.deploymentUrl) {
               console.log("❌ Build failed during polling - no deployed URL found, redirecting to index");
+              stopBuildProgress();
               navigate("/");
               return;
             }
             setError("Project build failed during polling.");
             setProjectStatus("error");
+            stopBuildProgress();
             return;
           } else if (attempts >= maxAttempts) {
             setError("Project is taking too long to build. Please check back later.");
             setProjectStatus("error");
+            stopBuildProgress();
             return;
           }
           
@@ -407,6 +523,7 @@ const ChatPage: React.FC = () => {
           if (attempts >= maxAttempts) {
             setError("Failed to check project status");
             setProjectStatus("error");
+            stopBuildProgress();
           } else {
             setTimeout(poll, 5000); // Retry with longer interval
           }
@@ -415,7 +532,7 @@ const ChatPage: React.FC = () => {
       
       poll();
     },
-    [baseUrl, navigate]
+    [baseUrl, navigate, stopBuildProgress]
   );
 
   // Initialize or get session
@@ -610,6 +727,7 @@ const ChatPage: React.FC = () => {
       isGenerating.current = true;
       setError("");
       setProjectStatus("loading");
+      startBuildProgress();
 
       try {
         console.log(`🎨 Generating code for prompt: "${userPrompt}"`);
@@ -620,6 +738,7 @@ const ChatPage: React.FC = () => {
 
         setPreviewUrl(response.data.previewUrl);
         setProjectStatus("ready");
+        stopBuildProgress();
         console.log("✅ Code generated successfully:", response.data.previewUrl);
 
         // Update project if needed
@@ -639,6 +758,8 @@ const ChatPage: React.FC = () => {
         }
       } catch (error) {
         console.error("Error generating code:", error);
+        stopBuildProgress();
+        
         if (axios.isAxiosError(error) && error.code === 'ERR_NETWORK') {
           setError("Cannot connect to server. Please check if the backend is running.");
         } else {
@@ -665,7 +786,7 @@ const ChatPage: React.FC = () => {
         isGenerating.current = false;
       }
     },
-    [baseUrl, navigate]
+    [baseUrl, navigate, startBuildProgress, stopBuildProgress]
   );
 
   // Check if we should run initialization
@@ -1088,6 +1209,7 @@ const ChatPage: React.FC = () => {
 
     setIsLoading(true);
     setError("");
+    startBuildProgress();
 
     const newMessage: Message = {
       id: Date.now().toString(),
@@ -1129,8 +1251,9 @@ const ChatPage: React.FC = () => {
       await saveMessage(errorMessage.content, 'assistant');
     } finally {
       setIsLoading(false);
+      stopBuildProgress();
     }
-  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary, handleNonStreamingSubmit]);
+  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary, handleNonStreamingSubmit, startBuildProgress, stopBuildProgress]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -1178,6 +1301,49 @@ const ChatPage: React.FC = () => {
     await fetchReadyProject(projectId);
   }, [projectId, fetchReadyProject]);
 
+  // NEW: CodePup Loading Component
+  const CodePupLoading = () => (
+    <div className="flex flex-col items-center justify-center h-full text-center p-8">
+      <div className="relative mb-6">
+        {/* Animated CodePup */}
+        <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-purple-600 rounded-full flex items-center justify-center relative animate-bounce">
+          <div className="text-white text-lg font-bold">🐕</div>
+          <div className="absolute -top-2 -right-2 w-6 h-6 bg-yellow-400 rounded-full flex items-center justify-center animate-pulse">
+            <Code className="w-3 h-3 text-yellow-800" />
+          </div>
+        </div>
+        
+        {/* Floating particles */}
+        <div className="absolute top-0 left-0 w-full h-full">
+          <div className="absolute top-2 left-2 w-2 h-2 bg-blue-400 rounded-full animate-ping"></div>
+          <div className="absolute bottom-2 right-2 w-2 h-2 bg-purple-400 rounded-full animate-ping animation-delay-300"></div>
+          <div className="absolute top-4 right-4 w-1 h-1 bg-green-400 rounded-full animate-ping animation-delay-500"></div>
+        </div>
+      </div>
+      
+      <h3 className="text-xl font-semibold text-white mb-2">CodePup is Building! 🚀</h3>
+      <p className="text-slate-300 mb-4 max-w-sm">
+        Your friendly coding companion is working hard to create something amazing for you!
+      </p>
+      
+      {/* Animated typing dots */}
+      <div className="flex items-center space-x-1 mb-6">
+        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
+        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce animation-delay-200"></div>
+        <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce animation-delay-400"></div>
+      </div>
+      
+      {/* Progress bar */}
+      <div className="w-full max-w-sm bg-slate-700 rounded-full h-2 mb-4">
+        <div className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full animate-pulse" style={{width: '70%'}}></div>
+      </div>
+      
+      <p className="text-sm text-slate-400">
+        Woof woof! Almost there... 🐾
+      </p>
+    </div>
+  );
+
   return (
     <div className="w-full bg-gradient-to-br from-black via-neutral-950 to-black h-screen flex">
       {/* Chat Section - 25% width */}
@@ -1187,7 +1353,7 @@ const ChatPage: React.FC = () => {
           <div className="flex items-center justify-between">
             <div>
               <a href="/" className="text-xl font-semibold text-white">
-                Buildora
+                CodePup
               </a>
             </div>
             <div className="flex items-center gap-2">
@@ -1279,6 +1445,66 @@ const ChatPage: React.FC = () => {
           </div>
         )}
 
+        {/* NEW: Build Progress Section */}
+        {showBuildProgress && (
+          <div className="bg-blue-900/20 border-b border-blue-700/50 p-3">
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-4 h-4 bg-blue-500 rounded-full animate-pulse"></div>
+              <span className="text-xs font-medium text-blue-400">BUILDING PROJECT</span>
+            </div>
+            <div className="space-y-2">
+              {buildSteps.map((step, index) => {
+                const IconComponent = step.icon;
+                return (
+                  <div key={step.id} className="flex items-center gap-3">
+                    <div className={`w-5 h-5 rounded-full flex items-center justify-center ${
+                      step.completed 
+                        ? 'bg-green-500' 
+                        : step.inProgress 
+                        ? 'bg-blue-500 animate-pulse' 
+                        : 'bg-slate-600'
+                    }`}>
+                      {step.completed ? (
+                        <CheckCircle className="w-3 h-3 text-white" />
+                      ) : step.inProgress ? (
+                        <Loader2 className="w-3 h-3 text-white animate-spin" />
+                      ) : (
+                        <IconComponent className="w-3 h-3 text-slate-400" />
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <p className={`text-xs font-medium ${
+                        step.completed 
+                          ? 'text-green-400' 
+                          : step.inProgress 
+                          ? 'text-blue-400' 
+                          : 'text-slate-500'
+                      }`}>
+                        {step.title}
+                      </p>
+                      <p className={`text-xs ${
+                        step.completed 
+                          ? 'text-green-300' 
+                          : step.inProgress 
+                          ? 'text-blue-300' 
+                          : 'text-slate-600'
+                      }`}>
+                        {step.description}
+                      </p>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="mt-3 bg-slate-700 rounded-full h-2">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full transition-all duration-500"
+                style={{ width: `${((currentBuildStep + 1) / buildSteps.length) * 100}%` }}
+              ></div>
+            </div>
+          </div>
+        )}
+
         {/* Summary Section */}
         {currentSummary && (
           <div className="bg-slate-800/30 border-b border-slate-700/50 p-3">
@@ -1357,14 +1583,14 @@ const ChatPage: React.FC = () => {
                   ? "Fetching Project" 
                   : existingProject 
                     ? "Loading Project" 
-                    : "Generating Code"}
+                    : "CodePup is Building"}
               </h3>
               <p className="text-slate-400 max-w-sm text-sm">
                 {projectStatus === "fetching"
                   ? "Fetching project details and deployment status..."
                   : existingProject
                     ? "Loading your project preview..."
-                    : "We are generating code files please wait"}
+                    : "Your friendly coding companion is generating code files"}
               </p>
               {currentProject && (
                 <div className="mt-3 text-xs text-slate-500">
@@ -1375,10 +1601,10 @@ const ChatPage: React.FC = () => {
           ) : messages.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="p-4 bg-slate-800/30 rounded-full mb-4">
-                <Code className="w-8 h-8 text-slate-400" />
+                <div className="text-2xl">🐕</div>
               </div>
               <h3 className="text-lg font-medium text-white mb-2">
-                Ready to Chat
+                CodePup is Ready!
               </h3>
               <p className="text-slate-400 max-w-sm text-sm">
                 {currentProject && currentProject.status === 'ready' 
@@ -1401,10 +1627,17 @@ const ChatPage: React.FC = () => {
                     className={`p-3 rounded-lg ${
                       message.type === "user"
                         ? "bg-blue-600/20 ml-4"
+                        : message.type === "system"
+                        ? "bg-purple-600/20 mr-4"
                         : "bg-slate-800/30 mr-4"
                     }`}
                   >
                     <div className="flex items-start gap-2">
+                      {message.type === "system" && (
+                        <div className="w-5 h-5 bg-purple-500 rounded-full flex items-center justify-center mt-0.5">
+                          <div className="text-xs">🐕</div>
+                        </div>
+                      )}
                       <p className="text-white text-sm flex-1">
                         {message.content}
                         {message.isStreaming && (
@@ -1438,6 +1671,8 @@ const ChatPage: React.FC = () => {
                   ? "Server offline..." 
                   : currentProject?.status !== 'ready'
                     ? "Project not ready..."
+                    : showBuildProgress
+                    ? "CodePup is building..."
                     : "Describe changes..."
               }
               rows={2}
@@ -1447,6 +1682,7 @@ const ChatPage: React.FC = () => {
                 projectStatus === "fetching" ||
                 isStreamingResponse || 
                 isServerHealthy === false ||
+                showBuildProgress ||
                 (currentProject && currentProject.status !== 'ready')
               }
               maxLength={1000}
@@ -1460,11 +1696,12 @@ const ChatPage: React.FC = () => {
                 projectStatus === "fetching" ||
                 isStreamingResponse || 
                 isServerHealthy === false ||
+                showBuildProgress ||
                 (currentProject && currentProject.status !== 'ready')
               }
               className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg transition-colors duration-200"
             >
-              {isLoading || isStreamingResponse ? (
+              {isLoading || isStreamingResponse || showBuildProgress ? (
                 <Loader2 className="w-4 h-4 text-white animate-spin" />
               ) : (
                 <Send className="w-4 h-4 text-white" />
@@ -1477,6 +1714,8 @@ const ChatPage: React.FC = () => {
                 ? "Server offline - check connection" 
                 : currentProject?.status !== 'ready'
                   ? "Project not ready for modifications"
+                  : showBuildProgress
+                  ? "CodePup is building your project..."
                   : "Enter to send, Shift+Enter for new line"
               }
             </span>
@@ -1490,7 +1729,15 @@ const ChatPage: React.FC = () => {
         {/* Preview Header */}
         <div className="bg-black/50 backdrop-blur-sm border-b border-slate-700/50 p-4">
           <div className="flex items-center justify-between">
-            <h2 className="text-lg font-semibold text-white">Live Preview</h2>
+            <div className="flex items-center gap-3">
+              <h2 className="text-lg font-semibold text-white">Live Preview</h2>
+              {showBuildProgress && (
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></div>
+                  <span className="text-xs text-blue-400">CodePup Building...</span>
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-4">
               {sessionId && (
                 <span className="text-xs text-slate-400">
@@ -1538,7 +1785,7 @@ const ChatPage: React.FC = () => {
         {/* Preview Content */}
         <div className="flex-1 p-4">
           <div className="w-full h-full bg-white rounded-lg shadow-2xl overflow-hidden">
-            {previewUrl && isServerHealthy !== false ? (
+            {previewUrl && isServerHealthy !== false && !showBuildProgress ? (
               <iframe
                 src={previewUrl}
                 className="w-full h-full"
@@ -1551,71 +1798,75 @@ const ChatPage: React.FC = () => {
               />
             ) : (
               <div className="w-full h-full flex items-center justify-center bg-gray-50">
-                <div className="text-center max-w-md">
-                  <div className="w-16 h-16 bg-slate-200 rounded-lg mx-auto mb-4 flex items-center justify-center">
-                    {isServerHealthy === false ? (
-                      <AlertCircle className="w-8 h-8 text-red-400" />
-                    ) : isGenerating.current || projectStatus === "loading" || projectStatus === "fetching" ? (
-                      <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
-                    ) : (
-                      <Code className="w-8 h-8 text-slate-400" />
-                    )}
-                  </div>
-                  <p className="text-slate-600 mb-4">
-                    {isServerHealthy === false
-                      ? "Server is offline - cannot load preview"
-                      : projectStatus === "fetching"
-                      ? "Fetching project details..."
-                      : isGenerating.current
-                      ? existingProject
-                        ? "Loading preview..."
-                        : "Generating preview..."
-                      : projectStatus === "error"
-                      ? "Failed to load preview"
-                      : currentProject?.status === 'building'
-                      ? "Project is building - please wait..."
-                      : currentProject?.status === 'pending'
-                      ? "Project build is pending..."
-                      : "Preview will appear here"}
-                  </p>
-                  {currentProject && currentProject.status && currentProject.status !== 'ready' && (
-                    <div className="text-xs text-slate-500 mb-4">
-                      Project Status: {currentProject.status}
-                      {currentProject.status === 'building' && (
-                        <div className="mt-2">
-                          <div className="w-full bg-gray-200 rounded-full h-2">
-                            <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{width: '60%'}}></div>
-                          </div>
-                        </div>
+                {showBuildProgress ? (
+                  <CodePupLoading />
+                ) : (
+                  <div className="text-center max-w-md">
+                    <div className="w-16 h-16 bg-slate-200 rounded-lg mx-auto mb-4 flex items-center justify-center">
+                      {isServerHealthy === false ? (
+                        <AlertCircle className="w-8 h-8 text-red-400" />
+                      ) : isGenerating.current || projectStatus === "loading" || projectStatus === "fetching" ? (
+                        <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
+                      ) : (
+                        <div className="text-2xl">🐕</div>
                       )}
                     </div>
-                  )}
-                  {(isServerHealthy === false || projectStatus === "error") && (
-                    <button
-                      onClick={retryConnection}
-                      disabled={isRetrying}
-                      className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white rounded-lg transition-colors text-sm"
-                    >
-                      {isRetrying ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
-                          Reconnecting...
-                        </>
-                      ) : (
-                        "Retry Connection"
-                      )}
-                    </button>
-                  )}
-                  {currentProject && currentProject.status !== 'ready' && currentProject.status !== 'error' && isServerHealthy !== false && (
-                    <button
-                      onClick={refreshProject}
-                      className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm"
-                    >
-                      <RefreshCw className="w-4 h-4 inline mr-2" />
-                      Refresh Status
-                    </button>
-                  )}
-                </div>
+                    <p className="text-slate-600 mb-4">
+                      {isServerHealthy === false
+                        ? "Server is offline - cannot load preview"
+                        : projectStatus === "fetching"
+                        ? "Fetching project details..."
+                        : isGenerating.current
+                        ? existingProject
+                          ? "Loading preview..."
+                          : "CodePup is generating preview..."
+                        : projectStatus === "error"
+                        ? "Failed to load preview"
+                        : currentProject?.status === 'building'
+                        ? "CodePup is building your project - please wait..."
+                        : currentProject?.status === 'pending'
+                        ? "Project build is pending..."
+                        : "Preview will appear here"}
+                    </p>
+                    {currentProject && currentProject.status && currentProject.status !== 'ready' && (
+                      <div className="text-xs text-slate-500 mb-4">
+                        Project Status: {currentProject.status}
+                        {currentProject.status === 'building' && (
+                          <div className="mt-2">
+                            <div className="w-full bg-gray-200 rounded-full h-2">
+                              <div className="bg-blue-600 h-2 rounded-full animate-pulse" style={{width: '60%'}}></div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    {(isServerHealthy === false || projectStatus === "error") && (
+                      <button
+                        onClick={retryConnection}
+                        disabled={isRetrying}
+                        className="px-4 py-2 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-400 text-white rounded-lg transition-colors text-sm"
+                      >
+                        {isRetrying ? (
+                          <>
+                            <Loader2 className="w-4 h-4 animate-spin inline mr-2" />
+                            Reconnecting...
+                          </>
+                        ) : (
+                          "Retry Connection"
+                        )}
+                      </button>
+                    )}
+                    {currentProject && currentProject.status !== 'ready' && currentProject.status !== 'error' && isServerHealthy !== false && (
+                      <button
+                        onClick={refreshProject}
+                        className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm"
+                      >
+                        <RefreshCw className="w-4 h-4 inline mr-2" />
+                        Refresh Status
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
           </div>
