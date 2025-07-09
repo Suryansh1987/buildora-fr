@@ -1321,8 +1321,8 @@ const ChatPage: React.FC = () => {
         </div>
       </div>
       
-      <h3 className="text-xl font-semibold text-white mb-2">CodePup is Building! 🚀</h3>
-      <p className="text-slate-300 mb-4 max-w-sm">
+    <h3 className="text-2xl font-bold text-slate-800 mb-2">CodePup is Building! 🚀</h3>
+<p className="text-slate-700 mb-4 max-w-sm text-lg">
         Your friendly coding companion is working hard to create something amazing for you!
       </p>
       
@@ -1338,7 +1338,7 @@ const ChatPage: React.FC = () => {
         <div className="bg-gradient-to-r from-blue-500 to-purple-600 h-2 rounded-full animate-pulse" style={{width: '70%'}}></div>
       </div>
       
-      <p className="text-sm text-slate-400">
+      <p className="text-base text-slate-600 font-medium">
         Woof woof! Almost there... 🐾
       </p>
     </div>
@@ -1811,7 +1811,7 @@ const ChatPage: React.FC = () => {
                         <div className="text-2xl">🐕</div>
                       )}
                     </div>
-                    <p className="text-slate-600 mb-4">
+                   <p className="text-slate-800 mb-4 text-lg font-medium">
                       {isServerHealthy === false
                         ? "Server is offline - cannot load preview"
                         : projectStatus === "fetching"
@@ -1829,7 +1829,7 @@ const ChatPage: React.FC = () => {
                         : "Preview will appear here"}
                     </p>
                     {currentProject && currentProject.status && currentProject.status !== 'ready' && (
-                      <div className="text-xs text-slate-500 mb-4">
+                    <div className="text-sm text-slate-700 mb-4 font-medium">
                         Project Status: {currentProject.status}
                         {currentProject.status === 'building' && (
                           <div className="mt-2">
