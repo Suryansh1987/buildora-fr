@@ -10,7 +10,8 @@ import {
 
 import { motion } from "motion/react";
 import { useNavigate } from "react-router-dom";
-import { ExternalLink, Calendar, Code2, Trash2, MessageSquare, Clock, Activity, AlertCircle } from "lucide-react";
+import { ExternalLink, Calendar, Code2, Trash2, MessageSquare, Clock, Activity, AlertCircle, Database, Settings } from "lucide-react";
+import SupabaseConfigForm from './form'; // Import the form component
 
 // --- Types ---
 interface Project {
@@ -31,16 +32,22 @@ interface DbUser {
   clerkId: string;
   email: string;
   name: string;
-  phoneNumber: string | null;  // ✅ Now allows null
-  profileImage?: string;       // Optional
+  phoneNumber: string | null;
+  profileImage?: string;
 }
-
 
 interface SessionInfo {
   sessionId: string;
   messageCount: number;
   lastActivity: string;
   hasActiveConversation: boolean;
+}
+
+interface SupabaseConfig {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  supabaseToken: string;
+  databaseUrl: string;
 }
 
 // --- Constants ---
@@ -236,9 +243,41 @@ const Index = () => {
   const [loadingSessions, setLoadingSessions] = useState<boolean>(false);
   const [hasSessionSupport, setHasSessionSupport] = useState(true);
   const [backendStatus, setBackendStatus] = useState<'checking' | 'available' | 'limited'>('checking');
+  
+  // Supabase configuration state
+  const [showSupabaseConfig, setShowSupabaseConfig] = useState(false);
+  const [supabaseConfig, setSupabaseConfig] = useState<SupabaseConfig | null>(null);
+  const [isConfigValid, setIsConfigValid] = useState(false);
 
   const navigate = useNavigate();
   const { user: clerkUser, isLoaded } = useUser();
+
+  // Load Supabase config from localStorage on mount
+  useEffect(() => {
+    const stored = localStorage.getItem('supabaseConfig');
+    if (stored) {
+      try {
+        const config = JSON.parse(stored);
+        setSupabaseConfig(config);
+        setIsConfigValid(true);
+      } catch (error) {
+        console.warn('Failed to load stored Supabase config');
+      }
+    }
+  }, []);
+
+  // Handle Supabase config submission
+  const handleSupabaseConfigSubmit = useCallback((config: SupabaseConfig) => {
+    setSupabaseConfig(config);
+    setIsConfigValid(true);
+    localStorage.setItem('supabaseConfig', JSON.stringify(config));
+    console.log('Supabase configuration saved:', {
+      url: config.supabaseUrl,
+      hasAnonKey: !!config.supabaseAnonKey,
+      hasToken: !!config.supabaseToken,
+      hasDbUrl: !!config.databaseUrl
+    });
+  }, []);
 
   // Check backend capabilities
   const checkBackendCapabilities = useCallback(async () => {
@@ -268,6 +307,7 @@ const Index = () => {
     []
   );
 
+  // Updated handleProjectClick to pass Supabase config
   const handleProjectClick = useCallback(
     (project: Project) => {
       navigate("/chatPage", {
@@ -275,12 +315,14 @@ const Index = () => {
           projectId: project.id,
           existingProject: true,
           sessionId: hasSessionSupport ? projectSessions[project.id]?.sessionId : project.lastSessionId,
+          supabaseConfig: supabaseConfig, 
         },
       });
     },
-    [navigate, projectSessions, hasSessionSupport]
+    [navigate, projectSessions, hasSessionSupport, supabaseConfig]
   );
 
+  // Updated handleContinueChat to pass Supabase config
   const handleContinueChat = useCallback(
     (project: Project, e: React.MouseEvent<HTMLButtonElement>) => {
       e.stopPropagation();
@@ -289,10 +331,11 @@ const Index = () => {
           projectId: project.id,
           existingProject: true,
           sessionId: hasSessionSupport ? projectSessions[project.id]?.sessionId : project.lastSessionId,
+          supabaseConfig: supabaseConfig, // Pass Supabase config
         },
       });
     },
-    [navigate, projectSessions, hasSessionSupport]
+    [navigate, projectSessions, hasSessionSupport, supabaseConfig]
   );
 
   const handleDeleteProject = useCallback(
@@ -326,9 +369,16 @@ const Index = () => {
     [hasSessionSupport]
   );
 
+  // Updated handleSubmit to pass Supabase config
   const handleSubmit = useCallback(async () => {
     if (!dbUser || !prompt.trim()) {
       console.error("User not authenticated or prompt is empty");
+      return;
+    }
+
+    // Check if Supabase config is required and valid
+    if (!supabaseConfig || !isConfigValid) {
+      setShowSupabaseConfig(true);
       return;
     }
 
@@ -353,22 +403,24 @@ const Index = () => {
         newProject = projectResponse.data;
       } catch (projectError) {
         console.warn("Could not create project in database, proceeding without project ID");
-        // Navigate to chat page without project ID for now
+        // Navigate to chat page without project ID but with Supabase config
         navigate("/chatPage", {
           state: {
             prompt,
             existingProject: false,
+            supabaseConfig: supabaseConfig, // Pass Supabase config
           },
         });
         return;
       }
 
-      // Navigate to chat page with prompt and project ID
+      // Navigate to chat page with prompt, project ID, and Supabase config
       navigate("/chatPage", {
         state: {
           prompt,
           projectId: newProject.id,
           existingProject: false,
+          supabaseConfig: supabaseConfig, // Pass Supabase config
         },
       });
     } catch (error) {
@@ -377,7 +429,7 @@ const Index = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [dbUser, prompt, navigate]);
+  }, [dbUser, prompt, navigate, supabaseConfig, isConfigValid]);
 
   // Fetch session information for projects (only if session support is available)
   const fetchProjectSessions = useCallback(async (projectIds: number[]) => {
@@ -447,7 +499,7 @@ const Index = () => {
           // Create a fallback user object for development
           userResponse = {
             data: {
-              id: 1, // Fallback ID
+              id: 1, 
               clerkId: clerkUser.id,
               email: userData.email,
               name: userData.name,
@@ -620,8 +672,31 @@ const Index = () => {
           initial={{ y: -20, opacity: 0 }}
           animate={{ y: 0, opacity: 1 }}
           transition={{ duration: 0.8, delay: 0.2 }}
-          className="absolute top-6 right-6 z-20"
+          className="absolute top-6 right-6 z-20 flex items-center gap-4"
         >
+          <SignedIn>
+            {/* Supabase Config Button */}
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setShowSupabaseConfig(true)}
+              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm font-medium transition-all duration-200 ${
+                isConfigValid 
+                  ? 'bg-green-500/10 border-green-500/20 text-green-400 hover:bg-green-500/20' 
+                  : 'bg-orange-500/10 border-orange-500/20 text-orange-400 hover:bg-orange-500/20'
+              }`}
+              title={isConfigValid ? "Supabase configured" : "Configure Supabase"}
+            >
+              <Database className="w-4 h-4" />
+              <span className="hidden sm:inline">
+                {isConfigValid ? "Backend Ready" : "Setup Backend"}
+              </span>
+              <div className={`w-2 h-2 rounded-full ${
+                isConfigValid ? 'bg-green-500' : 'bg-orange-500'
+              }`}></div>
+            </motion.button>
+          </SignedIn>
+
           <SignedOut>
             <motion.div whileHover={{ scale: 1.05 }} whileTap={{ scale: 0.95 }}>
               <SignInButton>
@@ -715,6 +790,27 @@ const Index = () => {
 
           {/* Content only visible when signed in */}
           <SignedIn>
+            {/* Configuration Required Message */}
+            {!isConfigValid && (
+              <motion.div
+                initial={{ y: 20, opacity: 0 }}
+                animate={{ y: 0, opacity: 1 }}
+                transition={{ duration: 0.8, delay: 1.1 }}
+                className="mb-8 text-center"
+              >
+                <div className="inline-flex items-center gap-2 px-4 py-3 bg-orange-500/10 border border-orange-500/20 rounded-lg text-orange-400">
+                  <Database className="w-5 h-5" />
+                  <span className="text-sm font-medium">Backend configuration required to create projects</span>
+                  <button
+                    onClick={() => setShowSupabaseConfig(true)}
+                    className="ml-2 px-3 py-1 bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 text-xs rounded transition-colors"
+                  >
+                    Configure Now
+                  </button>
+                </div>
+              </motion.div>
+            )}
+
             {/* Prompt Input Section */}
             <div className="flex flex-col items-center mb-12">
               <motion.textarea
@@ -731,8 +827,13 @@ const Index = () => {
                 }}
                 value={prompt}
                 onChange={handlePromptChange}
-                placeholder="Describe your project idea... (Ctrl/Cmd + Enter to create)"
+                placeholder={
+                  !isConfigValid 
+                    ? "Configure backend settings first to create projects..."
+                    : "Describe your project idea... (Ctrl/Cmd + Enter to create)"
+                }
                 className="mb-4 border-2 focus:outline-0 border-neutral-400 rounded-lg text-white p-3 w-full max-w-2xl h-36 bg-black/50 backdrop-blur-sm transition-all duration-300 placeholder-neutral-500"
+                disabled={!isConfigValid}
               />
 
               <motion.button
@@ -744,13 +845,13 @@ const Index = () => {
                   delay: 1.5,
                 }}
                 whileHover={{
-                  scale: 1.05,
-                  boxShadow: "0 10px 25px rgba(96, 165, 250, 0.3)",
+                  scale: isConfigValid && prompt.trim() ? 1.05 : 1,
+                  boxShadow: isConfigValid && prompt.trim() ? "0 10px 25px rgba(96, 165, 250, 0.3)" : "none",
                 }}
-                whileTap={{ scale: 0.95 }}
+                whileTap={{ scale: isConfigValid && prompt.trim() ? 0.95 : 1 }}
                 className="w-fit px-7 rounded-lg py-2 bg-blue-400 hover:bg-blue-500 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium"
                 onClick={handleSubmit}
-                disabled={isLoading || !prompt.trim()}
+                disabled={isLoading || !prompt.trim() || !isConfigValid}
               >
                 <motion.span
                   animate={
@@ -783,6 +884,8 @@ const Index = () => {
                       />
                       Creating Project...
                     </span>
+                  ) : !isConfigValid ? (
+                    "Configure Backend First"
                   ) : (
                     "Create New Project"
                   )}
@@ -861,9 +964,20 @@ const Index = () => {
                   <h3 className="text-xl font-medium text-white mb-2">
                     No projects yet
                   </h3>
-                  <p className="text-neutral-400">
-                    Create your first project by entering a prompt above
+                  <p className="text-neutral-400 mb-4">
+                    {!isConfigValid 
+                      ? "Configure your backend settings to start creating projects"
+                      : "Create your first project by entering a prompt above"
+                    }
                   </p>
+                  {!isConfigValid && (
+                    <button
+                      onClick={() => setShowSupabaseConfig(true)}
+                      className="px-4 py-2 bg-orange-500/20 hover:bg-orange-500/30 text-orange-300 rounded-lg transition-colors text-sm"
+                    >
+                      Configure Backend
+                    </button>
+                  )}
                 </motion.div>
               )}
             </motion.div>
@@ -898,8 +1012,14 @@ const Index = () => {
           </SignedOut>
         </div>
       </motion.div>
-    </>
-  );
-};
 
-export default Index;
+      {/* Supabase Configuration Form Modal */}
+      <SupabaseConfigForm
+        isOpen={showSupabaseConfig}
+        onClose={() => setShowSupabaseConfig(false)}
+        onSubmit={handleSupabaseConfigSubmit}
+        initialConfig={supabaseConfig || {}}
+      />
+    </>
+  );}
+  export default Index;
