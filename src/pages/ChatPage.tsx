@@ -7,7 +7,7 @@ import React, {
 } from "react";
 import { MyContext } from "../context/FrontendStructureContext";
 import axios from "axios";
-import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink } from "lucide-react";
+import { Send, Code, Loader2, MessageSquare, History, RefreshCw, AlertCircle, ExternalLink, Zap, Activity } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 type ProjectInfo = {
@@ -64,6 +64,30 @@ interface ConversationStats {
   averageMessageLength: number;
 }
 
+// NEW: Streaming interfaces
+interface StreamingProgressData {
+  type: 'progress' | 'length' | 'chunk' | 'complete' | 'error' | 'result';
+  buildId: string;
+  sessionId: string;
+  totalLength?: number;
+  currentLength?: number;
+  percentage?: number;
+  chunk?: string;
+  phase?: 'generating' | 'parsing' | 'processing' | 'deploying' | 'complete';
+  message?: string;
+  error?: string;
+  result?: any;
+}
+
+interface StreamingStats {
+  totalCharacters: number;
+  chunksReceived: number;
+  estimatedTotalChunks: number;
+  startTime: number;
+  endTime?: number;
+  bytesPerSecond?: number;
+}
+
 const ChatPage: React.FC = () => {
   const context = useContext(MyContext);
   const { value } = context as ContextValue;
@@ -86,7 +110,21 @@ const ChatPage: React.FC = () => {
   const [isRetrying, setIsRetrying] = useState(false);
   const [currentProject, setCurrentProject] = useState<Project | null>(null);
   
-  // NEW: Project matching state
+  // NEW: Streaming state
+  const [isStreamingGeneration, setIsStreamingGeneration] = useState(false);
+  const [streamingProgress, setStreamingProgress] = useState(0);
+  const [streamingPhase, setStreamingPhase] = useState<string>('');
+  const [streamingMessage, setStreamingMessage] = useState<string>('');
+  const [streamingStats, setStreamingStats] = useState<StreamingStats>({
+    totalCharacters: 0,
+    chunksReceived: 0,
+    estimatedTotalChunks: 0,
+    startTime: 0
+  });
+  const [generationChunks, setGenerationChunks] = useState<string[]>([]);
+  const [showStreamingDetails, setShowStreamingDetails] = useState(false);
+  
+  // Project matching state
   const [currentProjectInfo, setCurrentProjectInfo] = useState<ProjectInfo>({
     id: null,
     name: null,
@@ -103,6 +141,7 @@ const ChatPage: React.FC = () => {
   const sessionInitialized = useRef(false);
   const projectLoaded = useRef(false);
   const healthCheckDone = useRef(false);
+  const streamingEventSource = useRef<EventSource | null>(null);
 
   const location = useLocation();
   const {
@@ -111,7 +150,6 @@ const ChatPage: React.FC = () => {
     existingProject,
     sessionId: initialSessionId,
     supabaseConfig
-
   } = (location.state as LocationState) || {};
 
   const baseUrl = import.meta.env.VITE_BASE_URL;
@@ -164,17 +202,16 @@ const ChatPage: React.FC = () => {
     return undefined;
   }, [previewUrl]);
 
-  // NEW: Get current user ID (replace with your actual auth logic)
+  // Get current user ID (replace with your actual auth logic)
   const getCurrentUserId = useCallback((): number => {
-    // TODO: Replace with your actual authentication system
     const storedUserId = localStorage.getItem('userId');
     if (storedUserId && !isNaN(parseInt(storedUserId))) {
       return parseInt(storedUserId);
     }
     return 1;
   }, []);
+
   const getprojectId = useCallback((): number|null => {
-    // TODO: Replace with your actual authentication system
     const storedProjectId = localStorage.getItem('projectId');
     if (storedProjectId && !isNaN(parseInt(storedProjectId))) {
       return parseInt(storedProjectId);
@@ -182,80 +219,244 @@ const ChatPage: React.FC = () => {
     return null;
   }, []);
 
-  // NEW: Verify project by URL
- const verifyProjectByUrl = useCallback(async (): Promise<{
-  hasMatch: boolean;
-  project: any | null;
-  matchReason: string;
-}> => {
-  const deployedUrl = getDeployedAppUrl();
-  const projectId = getprojectId();
+  // NEW: Handle streaming generation progress
+  const handleStreamingData = useCallback((data: StreamingProgressData) => {
+    console.log('📡 Streaming data received:', data.type, data.message);
+    
+    switch (data.type) {
+      case 'progress':
+        setStreamingProgress(data.percentage || 0);
+        setStreamingPhase(data.phase || '');
+        setStreamingMessage(data.message || '');
+        break;
 
-  if (!deployedUrl || !projectId) {
-    return {
-      hasMatch: false,
-      project: null,
-      matchReason: 'no_deployed_url'
-    };
-  }
+      case 'length':
+        setStreamingStats(prev => ({
+          ...prev,
+          totalCharacters: data.currentLength || 0,
+          bytesPerSecond: prev.startTime ? 
+            (data.currentLength || 0) / ((Date.now() - prev.startTime) / 1000) : 0
+        }));
+        setStreamingProgress(data.percentage || 0);
+        break;
 
-  try {
-    console.log(`🔍 Verifying project for URL: ${deployedUrl}`);
-    const userId = getCurrentUserId();
+      case 'chunk':
+        if (data.chunk) {
+          setGenerationChunks(prev => [...prev, data.chunk!]);
+          setStreamingStats(prev => ({
+            ...prev,
+            chunksReceived: prev.chunksReceived + 1,
+            totalCharacters: data.currentLength || prev.totalCharacters,
+            estimatedTotalChunks: Math.ceil((data.totalLength || 0) / 10000)
+          }));
+        }
+        break;
 
-    const response = await axios.get(
-      `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}&projectId=${projectId}`,
-      { timeout: 5000 }
-    );
+      case 'complete':
+        setStreamingProgress(100);
+        setStreamingPhase('complete');
+        setStreamingMessage(data.message || 'Generation completed!');
+        setStreamingStats(prev => ({
+          ...prev,
+          endTime: Date.now()
+        }));
+        break;
 
-    const result = response.data;
+      case 'result':
+        if (data.result) {
+          setPreviewUrl(data.result.previewUrl);
+          setProjectStatus("ready");
+          
+          // Add completion message
+          const completionMessage: Message = {
+            id: `completion-${Date.now()}`,
+            content: `🎉 Project generated successfully!\n\n**Statistics:**\n- Total characters: ${data.result.streamingStats?.totalCharacters || 'N/A'}\n- Chunks streamed: ${data.result.streamingStats?.chunksStreamed || 0}\n- Files created: ${data.result.files?.length || 0}\n\n[View Preview](${data.result.previewUrl})`,
+            type: "assistant",
+            timestamp: new Date(),
+          };
+          setMessages(prev => [...prev, completionMessage]);
+        }
+        setIsStreamingGeneration(false);
+        break;
 
-    if (result.success && result.data.hasMatch) {
-      console.log('✅ Project verified for current URL:', result.data.project.name);
-      setCurrentProjectInfo({
-        id: result.data.project.id,
-        name: result.data.project.name,
-        matchReason: 'url_match',
-        isVerified: true
+      case 'error':
+        setError(data.error || 'Generation failed');
+        setIsStreamingGeneration(false);
+        setProjectStatus("error");
+        break;
+    }
+  }, []);
+
+  // NEW: Start streaming generation
+  const startStreamingGeneration = useCallback(async (userPrompt: string, projId?: number) => {
+    if (isGenerating.current || isStreamingGeneration) {
+      console.log("🔄 Generation already in progress, skipping...");
+      return;
+    }
+
+    isGenerating.current = true;
+    setIsStreamingGeneration(true);
+    setError("");
+    setProjectStatus("loading");
+    setStreamingProgress(0);
+    setStreamingPhase('generating');
+    setStreamingMessage('Starting generation...');
+    setGenerationChunks([]);
+    setStreamingStats({
+      totalCharacters: 0,
+      chunksReceived: 0,
+      estimatedTotalChunks: 0,
+      startTime: Date.now()
+    });
+
+    try {
+      console.log(`🚀 Starting streaming generation for: "${userPrompt.substring(0, 50)}..."`);
+
+      const response = await fetch(`${baseUrl}/api/generate/stream`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: userPrompt,
+          projectId: projId,
+          supabaseUrl: supabaseConfig?.supabaseUrl,
+          supabaseAnonKey: supabaseConfig?.supabaseAnonKey,
+          supabaseToken: supabaseConfig?.supabaseToken,
+          databaseUrl: supabaseConfig?.databaseUrl,
+          userId: getCurrentUserId(),
+        }),
       });
 
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('No response body');
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data: StreamingProgressData = JSON.parse(line.slice(6));
+              handleStreamingData(data);
+            } catch (e) {
+              console.warn('Error parsing streaming data:', e);
+            }
+          }
+        }
+      }
+
+      console.log("✅ Streaming generation completed");
+
+    } catch (error) {
+      console.error("❌ Streaming generation failed:", error);
+      setError(error instanceof Error ? error.message : 'Generation failed');
+      setIsStreamingGeneration(false);
+      setProjectStatus("error");
+    } finally {
+      isGenerating.current = false;
+    }
+  }, [baseUrl, supabaseConfig, handleStreamingData, getCurrentUserId, isStreamingGeneration]);
+
+  // NEW: Stop streaming generation
+  const stopStreamingGeneration = useCallback(() => {
+    if (streamingEventSource.current) {
+      streamingEventSource.current.close();
+      streamingEventSource.current = null;
+    }
+    setIsStreamingGeneration(false);
+    isGenerating.current = false;
+    setStreamingPhase('stopped');
+    setStreamingMessage('Generation stopped by user');
+  }, []);
+
+  // Verify project by URL
+  const verifyProjectByUrl = useCallback(async (): Promise<{
+    hasMatch: boolean;
+    project: any | null;
+    matchReason: string;
+  }> => {
+    const deployedUrl = getDeployedAppUrl();
+    const projectId = getprojectId();
+
+    if (!deployedUrl || !projectId) {
       return {
-        hasMatch: true,
-        project: result.data.project,
-        matchReason: 'url_match'
+        hasMatch: false,
+        project: null,
+        matchReason: 'no_deployed_url'
       };
-    } else {
-      console.log('⚠️ No project found for current URL');
+    }
+
+    try {
+      console.log(`🔍 Verifying project for URL: ${deployedUrl}`);
+      const userId = getCurrentUserId();
+
+      const response = await axios.get(
+        `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}&projectId=${projectId}`,
+        { timeout: 30000 }
+      );
+
+      const result = response.data;
+
+      if (result.success && result.data.hasMatch) {
+        console.log('✅ Project verified for current URL:', result.data.project.name);
+        setCurrentProjectInfo({
+          id: result.data.project.id,
+          name: result.data.project.name,
+          matchReason: 'url_match',
+          isVerified: true
+        });
+
+        return {
+          hasMatch: true,
+          project: result.data.project,
+          matchReason: 'url_match'
+        };
+      } else {
+        console.log('⚠️ No project found for current URL');
+        setCurrentProjectInfo({
+          id: null,
+          name: null,
+          matchReason: 'no_url_match',
+          isVerified: true
+        });
+
+        return {
+          hasMatch: false,
+          project: null,
+          matchReason: 'no_url_match'
+        };
+      }
+    } catch (error) {
+      console.error('❌ Failed to verify project by URL:', error);
       setCurrentProjectInfo({
         id: null,
         name: null,
-        matchReason: 'no_url_match',
-        isVerified: true
+        matchReason: 'verification_error',
+        isVerified: false
       });
 
       return {
         hasMatch: false,
         project: null,
-        matchReason: 'no_url_match'
+        matchReason: 'verification_error'
       };
     }
-  } catch (error) {
-    console.error('❌ Failed to verify project by URL:', error);
-    setCurrentProjectInfo({
-      id: null,
-      name: null,
-      matchReason: 'verification_error',
-      isVerified: false
-    });
-
-    return {
-      hasMatch: false,
-      project: null,
-      matchReason: 'verification_error'
-    };
-  }
-}, [baseUrl, getDeployedAppUrl, getCurrentUserId]);
-
+  }, [baseUrl, getDeployedAppUrl, getCurrentUserId, getprojectId]);
 
   // Server health check
   const checkServerHealth = useCallback(async () => {
@@ -319,14 +520,12 @@ const ChatPage: React.FC = () => {
         } else if (project.status === "building") {
           console.log("🔨 Project is still building, will poll for updates");
           setProjectStatus("loading");
-          // Start polling for project readiness
           await pollProjectStatus(projId);
         } else if (project.status === "pending") {
           console.log("⏳ Project is pending, waiting for build to start");
           setProjectStatus("loading");
           await pollProjectStatus(projId);
         } else if (project.status === "error") {
-          // NEW: Check if there's no deployed URL - means build failed on first go
           if (!project.deploymentUrl) {
             console.log("❌ Build failed on first attempt - no deployed URL found, redirecting to index");
             navigate("/");
@@ -335,13 +534,11 @@ const ChatPage: React.FC = () => {
           setError("Project build failed. Please try regenerating the project.");
           setProjectStatus("error");
         } else {
-          // Project exists but no deployment URL yet
           console.log("📝 Project found but deployment not ready, starting build...");
           
-          // Try to trigger a build if there's a prompt available
           if (navPrompt) {
-            console.log("🚀 Triggering build with navigation prompt");
-            await generateCode(navPrompt, projId);
+            console.log("🚀 Triggering streaming build with navigation prompt");
+            await startStreamingGeneration(navPrompt, projId);
           } else {
             setError("Project found, but deployment is not ready and no prompt available to rebuild.");
             setProjectStatus("error");
@@ -364,7 +561,7 @@ const ChatPage: React.FC = () => {
         setProjectStatus("error");
       }
     },
-    [baseUrl, projectStatus, navPrompt, navigate]
+    [baseUrl, projectStatus, navPrompt, navigate, startStreamingGeneration]
   );
 
   // Poll project status until it's ready
@@ -388,7 +585,6 @@ const ChatPage: React.FC = () => {
             setProjectStatus("ready");
             return;
           } else if (project.status === "error") {
-            // NEW: Check if there's no deployed URL during polling - means build failed
             if (!project.deploymentUrl) {
               console.log("❌ Build failed during polling - no deployed URL found, redirecting to index");
               navigate("/");
@@ -403,15 +599,14 @@ const ChatPage: React.FC = () => {
             return;
           }
           
-          // Continue polling
-          setTimeout(poll, 3000); // Poll every 3 seconds
+          setTimeout(poll, 3000);
         } catch (error) {
           console.error("Error during polling:", error);
           if (attempts >= maxAttempts) {
             setError("Failed to check project status");
             setProjectStatus("error");
           } else {
-            setTimeout(poll, 5000); // Retry with longer interval
+            setTimeout(poll, 5000);
           }
         }
       };
@@ -445,7 +640,6 @@ const ChatPage: React.FC = () => {
         } catch (sessionError) {
           console.warn("⚠️ Session endpoint not available, using project-based messaging");
           setHasSessionSupport(false);
-          // Use project-based session ID
           currentSessionId = projectId ? `project-${projectId}` : `temp-${Date.now()}`;
           setSessionId(currentSessionId);
         }
@@ -453,7 +647,6 @@ const ChatPage: React.FC = () => {
 
       sessionInitialized.current = true;
 
-      // Load existing conversation if session exists and session API is working
       if (currentSessionId && hasSessionSupport && !currentSessionId.startsWith('temp-') && !currentSessionId.startsWith('project-')) {
         try {
           console.log("📚 Loading conversation history...");
@@ -464,14 +657,13 @@ const ChatPage: React.FC = () => {
           console.warn("Could not load conversation history:", error);
         }
       } else if (projectId && !projectLoaded.current) {
-        // Try to load project-based messages - ONLY ONCE
         try {
           console.log("📋 Loading project messages...");
           await loadProjectMessages(projectId);
           projectLoaded.current = true;
         } catch (error) {
           console.warn("Could not load project messages:", error);
-          projectLoaded.current = true; // Mark as attempted even if failed
+          projectLoaded.current = true;
         }
       }
 
@@ -479,7 +671,7 @@ const ChatPage: React.FC = () => {
     } catch (error) {
       console.error("Error initializing session:", error);
       setError("Failed to initialize chat session");
-      sessionInitialized.current = true; // Mark as attempted
+      sessionInitialized.current = true;
       return null;
     }
   }, [baseUrl, projectId, initialSessionId, sessionId, hasSessionSupport]);
@@ -507,7 +699,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl]);
 
-  // Load project messages (enhanced with better error handling)
+  // Load project messages
   const loadProjectMessages = useCallback(async (projectId: number) => {
     if (projectLoaded.current) {
       console.log("🔄 Project messages already loaded, skipping...");
@@ -518,7 +710,6 @@ const ChatPage: React.FC = () => {
       console.log(`📋 Loading messages for project ${projectId}...`);
       const response = await axios.get(`${baseUrl}/api/messages/project/${projectId}`);
       
-      // Handle the new response structure
       if (response.data.success && response.data.data) {
         const history = response.data.data;
         
@@ -539,9 +730,8 @@ const ChatPage: React.FC = () => {
       projectLoaded.current = true;
     } catch (error) {
       console.error("Error loading project messages:", error);
-      projectLoaded.current = true; // Mark as attempted even if failed
+      projectLoaded.current = true;
       
-      // Enhanced error handling
       if (axios.isAxiosError(error)) {
         if (error.response?.status === 404) {
           console.log(`📭 Project ${projectId} messages not found, starting fresh`);
@@ -550,7 +740,7 @@ const ChatPage: React.FC = () => {
           console.error("🔌 Network error loading project messages");
         } else {
           console.warn(`⚠️ Failed to load project messages: ${error.response?.data?.error || error.message}`);
-          setMessages([]); // Don't show error for this, just start fresh
+          setMessages([]);
         }
       } else {
         setMessages([]);
@@ -582,7 +772,7 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl]);
 
-  // Check if summary should be updated (after every 5 messages)
+  // Check if summary should be updated
   const checkAndUpdateSummary = useCallback(async (sessionId: string) => {
     if (!hasSessionSupport) return;
     
@@ -602,79 +792,18 @@ const ChatPage: React.FC = () => {
     }
   }, [baseUrl, messages.length, loadCurrentSummary, loadConversationStats, hasSessionSupport]);
 
-  // Memoized function to generate code
+  // MODIFIED: Use streaming generation instead of regular generation
   const generateCode = useCallback(
     async (userPrompt: string, projId?: number) => {
-      if (isGenerating.current) {
+      if (isGenerating.current || isStreamingGeneration) {
         console.log("🔄 Code generation already in progress, skipping...");
         return;
       }
 
-      isGenerating.current = true;
-      setError("");
-      setProjectStatus("loading");
-
-
-      try {
-        console.log(`🎨 Generating code for prompt: "${userPrompt}"`);
-        const response = await axios.post(`${baseUrl}/api/generate`, {
-          prompt: userPrompt,
-          projectId: projId,  
-  supabaseUrl:supabaseConfig.supabaseUrl,
-  supabaseAnonKey:supabaseConfig.supabaseAnonKey,
-  supabaseToken:supabaseConfig.supabaseToken,
-  databaseUrl:supabaseConfig.databaseUrl,
-
-        });
-
-        setPreviewUrl(response.data.previewUrl);
-        setProjectStatus("ready");
-        console.log("✅ Code generated successfully:", response.data.previewUrl);
-
-        // Update project if needed
-        if (projId && response.data.previewUrl) {
-          try {
-            await axios.put(`${baseUrl}/api/projects/${projId}`, {
-              deploymentUrl: response.data.previewUrl,
-              status: "ready",
-            });
-            
-            // Refresh project details
-            const updatedProject = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
-            setCurrentProject(updatedProject.data);
-          } catch (updateError) {
-            console.warn("Could not update project:", updateError);
-          }
-        }
-      } catch (error) {
-        console.error("Error generating code:", error);
-        if (axios.isAxiosError(error) && error.code === 'ERR_NETWORK') {
-          setError("Cannot connect to server. Please check if the backend is running.");
-        } else {
-          setError("Failed to generate code. Please try again.");
-        }
-        setProjectStatus("error");
-        
-        // NEW: If code generation fails and there's no existing deployed URL, redirect to index
-        if (projId) {
-          try {
-            const res = await axios.get<Project>(`${baseUrl}/api/projects/${projId}`);
-            if (!res.data.deploymentUrl) {
-              console.log("❌ Code generation failed and no deployed URL exists, redirecting to index");
-              navigate("/");
-              return;
-            }
-          } catch (fetchError) {
-            console.log("❌ Could not fetch project after generation failure, redirecting to index");
-            navigate("/");
-            return;
-          }
-        }
-      } finally {
-        isGenerating.current = false;
-      }
+      // Use streaming generation for better UX
+      await startStreamingGeneration(userPrompt, projId);
     },
-    [baseUrl, navigate]
+    [startStreamingGeneration, isStreamingGeneration]
   );
 
   // Check if we should run initialization
@@ -697,7 +826,6 @@ const ChatPage: React.FC = () => {
     try {
       const isHealthy = await checkServerHealth();
       if (isHealthy) {
-        // Retry initialization
         await initializeSession();
         
         if (existingProject && projectId) {
@@ -723,7 +851,6 @@ const ChatPage: React.FC = () => {
     if (!shouldInitialize()) {
       console.log("🔄 Skipping initialization - no new generation or existing project load needed");
       
-      // If we have projectId but no navPrompt and not existingProject, just load the existing preview
       if (projectId && !navPrompt && !existingProject && !hasInitialized.current) {
         console.log("🔍 Loading existing project preview only...");
         hasInitialized.current = true;
@@ -733,8 +860,6 @@ const ChatPage: React.FC = () => {
           if (serverHealthy) {
             await initializeSession();
             await fetchReadyProject(projectId);
-            
-            // Verify if this matches current URL
             await verifyProjectByUrl();
           }
         };
@@ -750,30 +875,24 @@ const ChatPage: React.FC = () => {
     const initializeWithHealthCheck = async () => {
       console.log("🚀 Starting ChatPage initialization...");
       
-      // Check server health first
       const serverHealthy = await checkServerHealth();
       if (!serverHealthy) {
         setProjectStatus("error");
         return;
       }
 
-      // Initialize session
       await initializeSession();
-      
-      // Verify project by URL before loading
       const urlVerification = await verifyProjectByUrl();
       
-      // Handle project loading with URL context
       if (existingProject && projectId) {
         console.log("📂 Loading existing project...");
         await fetchReadyProject(projectId);
         
-        // Check if loaded project matches URL
         if (!urlVerification.hasMatch && urlVerification.matchReason === 'no_url_match') {
           console.warn("⚠️ Loaded project doesn't match current URL context");
         }
       } else if (navPrompt && projectId) {
-        console.log("🎨 Generating new project...");
+        console.log("🎨 Generating new project with streaming...");
         setPrompt(navPrompt);
         await generateCode(navPrompt, projectId);
       } else {
@@ -801,11 +920,10 @@ const ChatPage: React.FC = () => {
         setPreviewUrl(project.deploymentUrl);
         setCurrentProject(project);
         
-        // Add a small delay to ensure the new deployment is ready
         setTimeout(() => {
           const iframe = document.querySelector('iframe');
           if (iframe) {
-            iframe.src = iframe.src; // Force refresh iframe
+            iframe.src = iframe.src;
           }
         }, 1000);
       }
@@ -822,7 +940,6 @@ const ChatPage: React.FC = () => {
     try {
       setIsStreamingResponse(true);
       
-      // Add streaming message placeholder
       const streamingMessage: Message = {
         id: `streaming-${Date.now()}`,
         content: "",
@@ -833,7 +950,6 @@ const ChatPage: React.FC = () => {
       
       setMessages((prev) => [...prev, streamingMessage]);
 
-      // Include URL context in request
       const deployedUrl = getDeployedAppUrl();
       const userId = getCurrentUserId();
       
@@ -886,7 +1002,6 @@ const ChatPage: React.FC = () => {
             try {
               const data = JSON.parse(line.slice(6));
               
-              // Handle progress events with project info
               if (data.message && data.projectId) {
                 lastProjectInfo = {
                   id: data.projectId,
@@ -898,7 +1013,6 @@ const ChatPage: React.FC = () => {
               if (data.content) {
                 accumulatedContent += data.content;
                 
-                // Update the streaming message
                 setMessages((prev) => 
                   prev.map((msg) => 
                     msg.id === streamingMessage.id 
@@ -914,7 +1028,6 @@ const ChatPage: React.FC = () => {
         }
       }
 
-      // Update project info if we got it from the response
       if (lastProjectInfo) {
         setCurrentProjectInfo({
           id: lastProjectInfo.id,
@@ -924,7 +1037,6 @@ const ChatPage: React.FC = () => {
         });
       }
 
-      // Finalize the streaming message
       setMessages((prev) => 
         prev.map((msg) => 
           msg.id === streamingMessage.id 
@@ -933,13 +1045,11 @@ const ChatPage: React.FC = () => {
         )
       );
 
-      // Refresh preview after streaming completes
       await refreshPreviewUrl();
 
     } catch (error) {
       console.error("Error in streaming response:", error);
       
-      // Remove streaming message and add error message
       setMessages((prev) => 
         prev.filter((msg) => msg.id !== streamingMessage.id)
       );
@@ -962,7 +1072,6 @@ const ChatPage: React.FC = () => {
 
     try {
       if (hasSessionSupport && sessionId && !sessionId.startsWith('temp-') && !sessionId.startsWith('project-')) {
-        // Use session-based messaging
         await axios.post(`${baseUrl}/api/conversation/messages`, {
           sessionId,
           message: {
@@ -971,7 +1080,6 @@ const ChatPage: React.FC = () => {
           },
         });
       } else {
-        // Use project-based messaging with the new API structure
         await axios.post(`${baseUrl}/api/messages`, {
           projectId,
           role,
@@ -987,7 +1095,6 @@ const ChatPage: React.FC = () => {
     } catch (error) {
       console.warn("Could not save message:", error);
       
-      // Don't throw error, just log it since message saving is not critical for UI
       if (axios.isAxiosError(error)) {
         console.warn(`Save message failed: ${error.response?.data?.error || error.message}`);
       }
@@ -1035,7 +1142,6 @@ const ChatPage: React.FC = () => {
           }
         }
 
-        // Try to extract meaningful response from the API
         if (response.data && response.data.content) {
           if (typeof response.data.content === 'string') {
             responseContent = response.data.content;
@@ -1055,14 +1161,11 @@ const ChatPage: React.FC = () => {
 
         setMessages((prev) => [...prev, assistantMessage]);
         await saveMessage(assistantMessage.content, 'assistant');
-
-        // Refresh preview after modifications
         await refreshPreviewUrl();
 
       } catch (error: any) {
         console.error("❌ Error in non-streaming submission:", error.message || error);
         
-        // Try to provide helpful error information
         let errorMessage = "Sorry, I encountered an error while applying the changes.";
         
         if (axios.isAxiosError(error)) {
@@ -1093,7 +1196,7 @@ const ChatPage: React.FC = () => {
 
   // Handle user prompt for code changes
   const handleSubmit = useCallback(async () => {
-    if (!prompt.trim() || isLoading) return;
+    if (!prompt.trim() || isLoading || isStreamingGeneration) return;
 
     setIsLoading(true);
     setError("");
@@ -1109,18 +1212,13 @@ const ChatPage: React.FC = () => {
     const currentPrompt = prompt;
     setPrompt("");
 
-    // Save user message
     await saveMessage(currentPrompt, 'user');
 
     try {
       if (hasSessionSupport && sessionId && !sessionId.startsWith('temp-')) {
-        // Use streaming response for better UX
         await handleStreamingResponse(currentPrompt, sessionId);
-        
-        // Check if summary needs to be updated
         await checkAndUpdateSummary(sessionId);
       } else {
-        // Fall back to the non-streaming modification approach
         await handleNonStreamingSubmit(currentPrompt);
       }
     } catch (error) {
@@ -1139,7 +1237,7 @@ const ChatPage: React.FC = () => {
     } finally {
       setIsLoading(false);
     }
-  }, [prompt, isLoading, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary, handleNonStreamingSubmit]);
+  }, [prompt, isLoading, isStreamingGeneration, sessionId, hasSessionSupport, saveMessage, handleStreamingResponse, checkAndUpdateSummary, handleNonStreamingSubmit]);
 
   const handleKeyPress = useCallback(
     (e: React.KeyboardEvent) => {
@@ -1158,7 +1256,7 @@ const ChatPage: React.FC = () => {
     []
   );
 
-  // Clear conversation (enhanced)
+  // Clear conversation
   const clearConversation = useCallback(async () => {
     if (!sessionId) return;
     
@@ -1186,6 +1284,20 @@ const ChatPage: React.FC = () => {
     setError("");
     await fetchReadyProject(projectId);
   }, [projectId, fetchReadyProject]);
+
+  // NEW: Format streaming duration
+  const formatDuration = useCallback((ms: number) => {
+    const seconds = Math.floor(ms / 1000);
+    const minutes = Math.floor(seconds / 60);
+    return minutes > 0 ? `${minutes}m ${seconds % 60}s` : `${seconds}s`;
+  }, []);
+
+  // NEW: Format bytes per second
+  const formatSpeed = useCallback((bytesPerSecond: number) => {
+    if (bytesPerSecond < 1024) return `${bytesPerSecond.toFixed(0)} B/s`;
+    if (bytesPerSecond < 1024 * 1024) return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`;
+    return `${(bytesPerSecond / (1024 * 1024)).toFixed(2)} MB/s`;
+  }, []);
 
   return (
     <div className="w-full bg-gradient-to-br from-black via-neutral-950 to-black h-screen flex">
@@ -1216,6 +1328,16 @@ const ChatPage: React.FC = () => {
                   <RefreshCw className="w-4 h-4" />
                 </button>
               )}
+              {/* NEW: Stop streaming button */}
+              {isStreamingGeneration && (
+                <button
+                  onClick={stopStreamingGeneration}
+                  className="p-1.5 text-red-400 hover:text-red-300 transition-colors"
+                  title="Stop generation"
+                >
+                  <Activity className="w-4 h-4" />
+                </button>
+              )}
               {isServerHealthy === false && (
                 <button
                   onClick={retryConnection}
@@ -1234,7 +1356,83 @@ const ChatPage: React.FC = () => {
           </div>
         </div>
 
-        {/* Project Info Section - Enhanced with URL verification */}
+        {/* NEW: Streaming Progress Section */}
+        {isStreamingGeneration && (
+          <div className="bg-gradient-to-r from-blue-900/30 to-purple-900/30 border-b border-blue-500/20 p-3">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <Zap className="w-4 h-4 text-blue-400" />
+                <span className="text-xs font-medium text-blue-400">STREAMING GENERATION</span>
+                <button
+                  onClick={() => setShowStreamingDetails(!showStreamingDetails)}
+                  className="text-xs text-slate-400 hover:text-slate-300"
+                >
+                  {showStreamingDetails ? '−' : '+'}
+                </button>
+              </div>
+              <span className="text-xs text-blue-300">{streamingProgress.toFixed(0)}%</span>
+            </div>
+            
+            {/* Progress Bar */}
+            <div className="w-full bg-slate-800/50 rounded-full h-2 mb-2">
+              <div 
+                className="bg-gradient-to-r from-blue-500 to-purple-500 h-2 rounded-full transition-all duration-300 ease-out"
+                style={{ width: `${streamingProgress}%` }}
+              ></div>
+            </div>
+            
+            {/* Phase and Message */}
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="text-xs font-medium text-purple-400 capitalize">{streamingPhase}</span>
+                {streamingPhase === 'generating' && (
+                  <div className="flex space-x-1">
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-pulse"></div>
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+                  </div>
+                )}
+              </div>
+              <p className="text-xs text-slate-300 line-clamp-2">{streamingMessage}</p>
+            </div>
+
+            {/* Streaming Stats */}
+            {streamingStats.totalCharacters > 0 && (
+              <div className="mt-2 text-xs text-slate-400">
+                <div className="flex justify-between">
+                  <span>{streamingStats.totalCharacters.toLocaleString()} chars</span>
+                  <span>{streamingStats.chunksReceived}/{streamingStats.estimatedTotalChunks || '?'} chunks</span>
+                </div>
+                {streamingStats.bytesPerSecond && streamingStats.bytesPerSecond > 0 && (
+                  <div className="flex justify-between mt-1">
+                    <span>Speed: {formatSpeed(streamingStats.bytesPerSecond)}</span>
+                    <span>Duration: {formatDuration(Date.now() - streamingStats.startTime)}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Detailed Streaming Info */}
+            {showStreamingDetails && (
+              <div className="mt-3 p-2 bg-slate-800/30 rounded text-xs">
+                <div className="space-y-1">
+                  <div>Total Characters: {streamingStats.totalCharacters.toLocaleString()}</div>
+                  <div>Chunks Received: {streamingStats.chunksReceived}</div>
+                  <div>Estimated Total Chunks: {streamingStats.estimatedTotalChunks || 'Unknown'}</div>
+                  {streamingStats.bytesPerSecond && (
+                    <div>Speed: {formatSpeed(streamingStats.bytesPerSecond)}</div>
+                  )}
+                  <div>Elapsed: {formatDuration(Date.now() - streamingStats.startTime)}</div>
+                  {streamingStats.endTime && (
+                    <div>Total Duration: {formatDuration(streamingStats.endTime - streamingStats.startTime)}</div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Project Info Section */}
         {(currentProject || currentProjectInfo.isVerified) && (
           <div className="bg-slate-800/30 border-b border-slate-700/50 p-3">
             <div className="flex items-center gap-2 mb-2">
@@ -1356,24 +1554,32 @@ const ChatPage: React.FC = () => {
             </div>
           )}
 
-          {messages.length === 0 && (projectStatus === "loading" || projectStatus === "fetching") ? (
+          {messages.length === 0 && (projectStatus === "loading" || projectStatus === "fetching" || isStreamingGeneration) ? (
             <div className="flex flex-col items-center justify-center h-full text-center">
               <div className="p-4 bg-slate-800/30 rounded-full mb-4">
-                <Loader2 className="w-8 h-8 text-white animate-spin" />
+                {isStreamingGeneration ? (
+                  <Zap className="w-8 h-8 text-blue-400 animate-pulse" />
+                ) : (
+                  <Loader2 className="w-8 h-8 text-white animate-spin" />
+                )}
               </div>
               <h3 className="text-lg font-medium text-white mb-2">
-                {projectStatus === "fetching" 
-                  ? "Fetching Project" 
-                  : existingProject 
-                    ? "Loading Project" 
-                    : "Generating Code"}
+                {isStreamingGeneration
+                  ? "Streaming Generation"
+                  : projectStatus === "fetching" 
+                    ? "Fetching Project" 
+                    : existingProject 
+                      ? "Loading Project" 
+                      : "Generating Code"}
               </h3>
               <p className="text-slate-400 max-w-sm text-sm">
-                {projectStatus === "fetching"
-                  ? "Fetching project details and deployment status..."
-                  : existingProject
-                    ? "Loading your project preview..."
-                    : "We are generating code files please wait"}
+                {isStreamingGeneration
+                  ? `${streamingPhase} • ${streamingProgress.toFixed(0)}% complete`
+                  : projectStatus === "fetching"
+                    ? "Fetching project details and deployment status..."
+                    : existingProject
+                      ? "Loading your project preview..."
+                      : "We are generating code files please wait"}
               </p>
               {currentProject && (
                 <div className="mt-3 text-xs text-slate-500">
@@ -1445,9 +1651,11 @@ const ChatPage: React.FC = () => {
               placeholder={
                 isServerHealthy === false 
                   ? "Server offline..." 
+                  : isStreamingGeneration
+                  ? "Generation in progress..."
                   : currentProject?.status !== 'ready'
-                    ? "Project not ready..."
-                    : "Describe changes..."
+                  ? "Project not ready..."
+                  : "Describe changes..."
               }
               rows={2}
               disabled={
@@ -1455,6 +1663,7 @@ const ChatPage: React.FC = () => {
                 projectStatus === "loading" || 
                 projectStatus === "fetching" ||
                 isStreamingResponse || 
+                isStreamingGeneration ||
                 isServerHealthy === false ||
                 (currentProject && currentProject.status !== 'ready')
               }
@@ -1468,12 +1677,13 @@ const ChatPage: React.FC = () => {
                 projectStatus === "loading" || 
                 projectStatus === "fetching" ||
                 isStreamingResponse || 
+                isStreamingGeneration ||
                 isServerHealthy === false ||
                 (currentProject && currentProject.status !== 'ready')
               }
               className="absolute bottom-2 right-2 p-1.5 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 disabled:cursor-not-allowed rounded-lg transition-colors duration-200"
             >
-              {isLoading || isStreamingResponse ? (
+              {isLoading || isStreamingResponse || isStreamingGeneration ? (
                 <Loader2 className="w-4 h-4 text-white animate-spin" />
               ) : (
                 <Send className="w-4 h-4 text-white" />
@@ -1484,6 +1694,8 @@ const ChatPage: React.FC = () => {
             <span>
               {isServerHealthy === false 
                 ? "Server offline - check connection" 
+                : isStreamingGeneration
+                ? "Streaming generation in progress..."
                 : currentProject?.status !== 'ready'
                   ? "Project not ready for modifications"
                   : "Enter to send, Shift+Enter for new line"
@@ -1501,6 +1713,18 @@ const ChatPage: React.FC = () => {
           <div className="flex items-center justify-between">
             <h2 className="text-lg font-semibold text-white">Live Preview</h2>
             <div className="flex items-center gap-4">
+              {/* NEW: Streaming Status Indicator */}
+              {isStreamingGeneration && (
+                <div className="flex items-center gap-2 text-xs">
+                  <div className="flex space-x-1">
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce"></div>
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '0.1s'}}></div>
+                    <div className="w-1 h-1 bg-blue-400 rounded-full animate-bounce" style={{animationDelay: '0.2s'}}></div>
+                  </div>
+                  <span className="text-blue-400">Streaming {streamingPhase}</span>
+                  <span className="text-slate-400">{streamingProgress.toFixed(0)}%</span>
+                </div>
+              )}
               {sessionId && (
                 <span className="text-xs text-slate-400">
                   Session: {sessionId.slice(0, 8)}...
@@ -1527,6 +1751,8 @@ const ChatPage: React.FC = () => {
                   className={`w-3 h-3 rounded-full ${
                     isServerHealthy === false
                       ? "bg-red-500"
+                      : isStreamingGeneration
+                      ? "bg-blue-500 animate-pulse"
                       : projectStatus === "ready"
                       ? "bg-green-500"
                       : projectStatus === "loading" || projectStatus === "fetching"
@@ -1537,7 +1763,11 @@ const ChatPage: React.FC = () => {
                   }`}
                 ></div>
                 <span className="text-xs text-slate-400 capitalize">
-                  {isServerHealthy === false ? "offline" : projectStatus}
+                  {isServerHealthy === false 
+                    ? "offline" 
+                    : isStreamingGeneration 
+                    ? "streaming" 
+                    : projectStatus}
                 </span>
               </div>
             </div>
@@ -1547,7 +1777,7 @@ const ChatPage: React.FC = () => {
         {/* Preview Content */}
         <div className="flex-1 p-4">
           <div className="w-full h-full bg-white rounded-lg shadow-2xl overflow-hidden">
-            {previewUrl && isServerHealthy !== false ? (
+            {previewUrl && isServerHealthy !== false && !isStreamingGeneration ? (
               <iframe
                 src={previewUrl}
                 className="w-full h-full"
@@ -1564,6 +1794,8 @@ const ChatPage: React.FC = () => {
                   <div className="w-16 h-16 bg-slate-200 rounded-lg mx-auto mb-4 flex items-center justify-center">
                     {isServerHealthy === false ? (
                       <AlertCircle className="w-8 h-8 text-red-400" />
+                    ) : isStreamingGeneration ? (
+                      <Zap className="w-8 h-8 text-blue-400 animate-pulse" />
                     ) : isGenerating.current || projectStatus === "loading" || projectStatus === "fetching" ? (
                       <Loader2 className="w-8 h-8 text-slate-400 animate-spin" />
                     ) : (
@@ -1573,6 +1805,8 @@ const ChatPage: React.FC = () => {
                   <p className="text-slate-600 mb-4">
                     {isServerHealthy === false
                       ? "Server is offline - cannot load preview"
+                      : isStreamingGeneration
+                      ? `Streaming generation in progress: ${streamingPhase} (${streamingProgress.toFixed(0)}%)`
                       : projectStatus === "fetching"
                       ? "Fetching project details..."
                       : isGenerating.current
@@ -1587,7 +1821,32 @@ const ChatPage: React.FC = () => {
                       ? "Project build is pending..."
                       : "Preview will appear here"}
                   </p>
-                  {currentProject && currentProject.status && currentProject.status !== 'ready' && (
+
+                  {/* NEW: Streaming Progress Details in Preview */}
+                  {isStreamingGeneration && (
+                    <div className="mb-4">
+                      <div className="w-full bg-gray-200 rounded-full h-3 mb-2">
+                        <div 
+                          className="bg-gradient-to-r from-blue-500 to-purple-500 h-3 rounded-full transition-all duration-300"
+                          style={{ width: `${streamingProgress}%` }}
+                        ></div>
+                      </div>
+                      <div className="text-sm text-slate-600 space-y-1">
+                        <div>Phase: <span className="font-medium text-blue-600 capitalize">{streamingPhase}</span></div>
+                        {streamingStats.totalCharacters > 0 && (
+                          <div>Generated: <span className="font-medium">{streamingStats.totalCharacters.toLocaleString()}</span> characters</div>
+                        )}
+                        {streamingStats.chunksReceived > 0 && (
+                          <div>Chunks: <span className="font-medium">{streamingStats.chunksReceived}</span> received</div>
+                        )}
+                        {streamingStats.bytesPerSecond && streamingStats.bytesPerSecond > 0 && (
+                          <div>Speed: <span className="font-medium">{formatSpeed(streamingStats.bytesPerSecond)}</span></div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  {currentProject && currentProject.status && currentProject.status !== 'ready' && !isStreamingGeneration && (
                     <div className="text-xs text-slate-500 mb-4">
                       Project Status: {currentProject.status}
                       {currentProject.status === 'building' && (
@@ -1599,7 +1858,8 @@ const ChatPage: React.FC = () => {
                       )}
                     </div>
                   )}
-                  {(isServerHealthy === false || projectStatus === "error") && (
+                  
+                  {(isServerHealthy === false || projectStatus === "error") && !isStreamingGeneration && (
                     <button
                       onClick={retryConnection}
                       disabled={isRetrying}
@@ -1615,13 +1875,25 @@ const ChatPage: React.FC = () => {
                       )}
                     </button>
                   )}
-                  {currentProject && currentProject.status !== 'ready' && currentProject.status !== 'error' && isServerHealthy !== false && (
+                  
+                  {currentProject && currentProject.status !== 'ready' && currentProject.status !== 'error' && isServerHealthy !== false && !isStreamingGeneration && (
                     <button
                       onClick={refreshProject}
                       className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-lg transition-colors text-sm"
                     >
                       <RefreshCw className="w-4 h-4 inline mr-2" />
                       Refresh Status
+                    </button>
+                  )}
+
+                  {/* NEW: Stop streaming button in preview */}
+                  {isStreamingGeneration && (
+                    <button
+                      onClick={stopStreamingGeneration}
+                      className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white rounded-lg transition-colors text-sm ml-2"
+                    >
+                      <Activity className="w-4 h-4 inline mr-2" />
+                      Stop Generation
                     </button>
                   )}
                 </div>
