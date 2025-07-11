@@ -407,7 +407,7 @@ const ChatPage: React.FC = () => {
 
       const response = await axios.get(
         `${baseUrl}/api/modify/stream/verify-url/${userId}?url=${encodeURIComponent(deployedUrl)}&projectId=${projectId}`,
-        { timeout: 30000 }
+        { timeout: 100000 }
       );
 
       const result = response.data;
@@ -467,7 +467,7 @@ const ChatPage: React.FC = () => {
     try {
       console.log("🔍 Checking server health...");
       const healthResponse = await axios.get(`${baseUrl}/health`, { 
-        timeout: 5000 
+        timeout: 10000 
       });
       console.log("✅ Server is running:", healthResponse.data);
       setIsServerHealthy(true);
@@ -925,7 +925,7 @@ const ChatPage: React.FC = () => {
           if (iframe) {
             iframe.src = iframe.src;
           }
-        }, 1000);
+        }, 100000);
       }
     } catch (error) {
       console.warn("Could not refresh preview URL:", error);
